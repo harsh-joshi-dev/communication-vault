@@ -308,8 +308,6 @@ class ChatService {
         otherUser: params.userId ? undefined : {
           id: undefined,
           name: params.contactName,
-          phoneNumber: params.phoneNumber,
-          email: params.contactEmail,
           isAppUser: false,
         },
         lastMessage: undefined,
