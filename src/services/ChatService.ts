@@ -18,6 +18,13 @@ class ChatService {
   private socket: Socket | null = null;
   private messageListeners: ((message: Message) => void)[] = [];
   private chatListeners: ((chat: Chat) => void)[] = [];
+  private messageStatusListeners: ((update: {
+    messageId: string;
+    chatId: string;
+    status: Message['status'];
+    deliveredAt?: string;
+    readAt?: string;
+  }) => void)[] = [];
 
   get socketInstance(): Socket | null {
     return this.socket;
@@ -96,17 +103,18 @@ class ChatService {
           );
           // Notify listeners immediately
           this.messageListeners.forEach(listener => {
-            const deletedMessage: Message = {
-              id: data.messageId,
-              chatId: data.chatId,
-              senderId: '',
-              receiverId: '',
-              type: 'text',
-              content: '',
-              isDeleted: true,
-              status: 'sent',
-              createdAt: new Date().toISOString(),
-            };
+        const deletedMessage: Message = {
+          id: data.messageId,
+          chatId: data.chatId,
+          senderId: '',
+          receiverId: '',
+          type: 'text',
+          content: '',
+          isDeleted: true,
+          isViewOnce: false,
+          status: 'sent',
+          createdAt: new Date().toISOString(),
+        };
             listener(deletedMessage);
           });
         });
@@ -230,6 +238,7 @@ class ChatService {
       isViewOnce: options?.isViewOnce || false,
       autoDeleteAfter: options?.autoDeleteAfter,
       isDeleted: false,
+      status: 'sending', // Initial status
       createdAt: new Date().toISOString(),
     };
 
@@ -360,11 +369,6 @@ class ChatService {
     }
   }
 
-  async deleteMessage(messageId: string): Promise<void> {
-    if (!this.socket?.connected) return;
-
-    this.socket.emit('delete_message', {messageId});
-  }
 }
 
 export const chatService = new ChatService();
