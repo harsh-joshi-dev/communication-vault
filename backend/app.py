@@ -34,14 +34,21 @@ Config.init_app(app)
 
 # Initialize MongoDB
 try:
+    # Use connect with retry and timeout settings for Render
     connect(
         host=Config.MONGODB_URI,
-        alias='default'
+        alias='default',
+        connectTimeoutMS=30000,
+        serverSelectionTimeoutMS=30000,
+        socketTimeoutMS=30000,
+        retryWrites=True,
+        w='majority'
     )
     print(f"Connected to MongoDB: {Config.MONGODB_DB_NAME}")
 except Exception as e:
     print(f"MongoDB connection error: {e}")
     # Don't fail on startup, but log the error
+    # Connection will be retried on first use
 
 # Initialize extensions
 CORS(app, resources={r"/*": {"origins": "*"}})

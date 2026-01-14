@@ -12,7 +12,12 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
     
     # Database - MongoDB
-    MONGODB_URI = os.environ.get('MONGODB_URI') or 'mongodb+srv://kellyharrisoninfo:1gNy7ZxN8VoQHDE9@project0.e1kmvyv.mongodb.net/stealth_vault?retryWrites=true&w=majority&appName=Project0'
+    # Get URI from environment, with proper encoding for special characters
+    _mongodb_uri = os.environ.get('MONGODB_URI') or 'mongodb+srv://kellyharrisoninfo:1gNy7ZxN8VoQHDE9@project0.e1kmvyv.mongodb.net/stealth_vault?retryWrites=true&w=majority&appName=Project0'
+    # Ensure URI is properly formatted
+    if _mongodb_uri and not _mongodb_uri.startswith('mongodb'):
+        _mongodb_uri = f'mongodb+srv://{_mongodb_uri}'
+    MONGODB_URI = _mongodb_uri
     MONGODB_DB_NAME = os.environ.get('MONGODB_DB_NAME') or 'stealth_vault'
     
     # Extract database name from URI if not provided
