@@ -79,12 +79,8 @@ class ChatService {
           reject(new Error(`Connection failed: ${error.message}`));
         });
 
-        this.socket.on('disconnect', () => {
-          console.log('Chat disconnected');
-        });
-
         this.socket.on('connected', (data) => {
-          console.log('Connection confirmed:', data);
+          console.log('✅ Connection confirmed by server:', data);
         });
 
         // Set up event listeners
