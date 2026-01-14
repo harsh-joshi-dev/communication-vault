@@ -262,6 +262,11 @@ def register_socket_handlers(socketio_instance):
             # Also notify receiver directly via device room (ensures delivery even if not in chat room)
             if receiver_id:
                 socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_id}')
+                # Also emit to unique code room if we have receiverUniqueCode
+                receiver_unique_code = data.get('receiverUniqueCode')
+                if receiver_unique_code:
+                    socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_unique_code}')
+                # Also try emitting to receiver_id as code room (in case it's a unique code)
                 socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_id}')
                 
                 # Mark as delivered immediately (optimistic)
