@@ -367,18 +367,34 @@ class ChatService {
       );
 
       this.socket.emit('send_message', messageData, async (response: any) => {
-        if (response.error) {
-          // Check for specific error types
-          if (response.error.includes('not registered') || response.error.includes('not invited')) {
-            reject(new Error('User is not registered or invited. Please invite them first.'));
-          } else {
-            reject(new Error(response.error));
+        try {
+          // Handle undefined or null response
+          if (!response) {
+            console.error('No response from server');
+            reject(new Error('No response from server'));
+            return;
           }
-        } else {
-          // Update local storage with server response (includes server ID, timestamps, etc.)
-          const serverMessage = response.message;
-          await messageStorageService.saveMessage(serverMessage);
-          resolve(serverMessage);
+
+          if (response.error) {
+            // Check for specific error types
+            if (response.error.includes('not registered') || response.error.includes('not invited')) {
+              reject(new Error('User is not registered or invited. Please invite them first.'));
+            } else {
+              reject(new Error(response.error));
+            }
+          } else if (response.message) {
+            // Update local storage with server response (includes server ID, timestamps, etc.)
+            const serverMessage = response.message;
+            await messageStorageService.saveMessage(serverMessage);
+            resolve(serverMessage);
+          } else {
+            // If no error and no message, assume success and use the optimistic message
+            console.warn('Server response missing message field, using optimistic message');
+            resolve(message);
+          }
+        } catch (error: any) {
+          console.error('Error handling send_message response:', error);
+          reject(new Error(error?.message || 'Failed to send message'));
         }
       });
     });
