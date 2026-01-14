@@ -27,10 +27,11 @@ import {mediaService} from '../../services/MediaService';
 const ChatDetailScreen: React.FC = () => {
   const route = useRoute();
   const navigation = useNavigation();
-  const {chatId, contactName, receiverId, phoneNumber, email, isAppUser} = route.params as {
+  const {chatId, contactName, receiverId, receiverUniqueCode, phoneNumber, email, isAppUser} = route.params as {
     chatId: string;
     contactName: string;
     receiverId?: string | null;
+    receiverUniqueCode?: string;
     phoneNumber?: string;
     email?: string;
     isAppUser?: boolean;
@@ -46,6 +47,7 @@ const ChatDetailScreen: React.FC = () => {
   const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
   const [audioProgress, setAudioProgress] = useState<{[key: string]: number}>({});
   const [audioDuration, setAudioDuration] = useState<{[key: string]: number}>({});
+  const [currentDeviceId, setCurrentDeviceId] = useState<string>('');
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
