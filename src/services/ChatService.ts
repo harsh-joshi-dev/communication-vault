@@ -54,56 +54,62 @@ class ChatService {
           console.log('Chat disconnected');
         });
 
-    this.socket.on('new_message', async (message: Message) => {
-      // Store message locally
-      await messageStorageService.saveMessage(message);
-      
-      // Notify listeners
-      this.messageListeners.forEach(listener => listener(message));
-    });
+        this.socket.on('new_message', async (message: Message) => {
+          // Store message locally (non-blocking for speed)
+          messageStorageService.saveMessage(message).catch(err => 
+            console.error('Error saving message:', err)
+          );
+          
+          // Notify listeners immediately (optimistic update)
+          this.messageListeners.forEach(listener => listener(message));
+        });
 
-    this.socket.on('chat_updated', (chat: Chat) => {
-      this.chatListeners.forEach(listener => listener(chat));
-    });
+        this.socket.on('chat_updated', (chat: Chat) => {
+          this.chatListeners.forEach(listener => listener(chat));
+        });
 
-    // Listen for message status updates
-    this.socket.on('message_status_update', async (update: {
-      messageId: string;
-      chatId: string;
-      status: Message['status'];
-      deliveredAt?: string;
-      readAt?: string;
-    }) => {
-      // Update local storage
-      await messageStorageService.updateMessageStatus(
-        update.chatId,
-        update.messageId,
-        update.status,
-        update.deliveredAt,
-        update.readAt,
-      );
-      
-      // Notify listeners
-      this.messageStatusListeners.forEach(listener => listener(update));
-    });
+        // Listen for message status updates
+        this.socket.on('message_status_update', async (update: {
+          messageId: string;
+          chatId: string;
+          status: Message['status'];
+          deliveredAt?: string;
+          readAt?: string;
+        }) => {
+          // Update local storage (non-blocking)
+          messageStorageService.updateMessageStatus(
+            update.chatId,
+            update.messageId,
+            update.status,
+            update.deliveredAt,
+            update.readAt,
+          ).catch(err => console.error('Error updating status:', err));
+          
+          // Notify listeners immediately
+          this.messageStatusListeners.forEach(listener => listener(update));
+        });
 
-    // Listen for message deletion
-    this.socket.on('message_deleted', async (data: {chatId: string; messageId: string}) => {
-      await messageStorageService.deleteMessage(data.chatId, data.messageId);
-      // Notify listeners
-      this.messageListeners.forEach(listener => {
-        const deletedMessage: Message = {
-          id: data.messageId,
-          chatId: data.chatId,
-          senderId: '',
-          receiverId: '',
-          type: 'text',
-          content: '',
-          isDeleted: true,
-          status: 'sent',
-          createdAt: new Date().toISOString(),
-        };
-        listener(deletedMessage);
+        // Listen for message deletion
+        this.socket.on('message_deleted', async (data: {chatId: string; messageId: string}) => {
+          messageStorageService.deleteMessage(data.chatId, data.messageId).catch(err => 
+            console.error('Error deleting message:', err)
+          );
+          // Notify listeners immediately
+          this.messageListeners.forEach(listener => {
+            const deletedMessage: Message = {
+              id: data.messageId,
+              chatId: data.chatId,
+              senderId: '',
+              receiverId: '',
+              type: 'text',
+              content: '',
+              isDeleted: true,
+              status: 'sent',
+              createdAt: new Date().toISOString(),
+            };
+            listener(deletedMessage);
+          });
+        });
       });
     });
   }

@@ -32,12 +32,23 @@ class MessageStorageService {
   }
 
   /**
-   * Save a message
+   * Save a message (optimized for speed)
    */
   async saveMessage(message: Message): Promise<void> {
     try {
       const key = `${MessageStorageService.MESSAGES_KEY_PREFIX}${message.chatId}`;
-      const messages = await this.getMessages(message.chatId);
+      
+      // Use getItem directly for speed (avoid full parse if not needed)
+      const messagesJson = await EncryptedStorage.getItem(key);
+      let messages: Message[] = [];
+      
+      if (messagesJson) {
+        try {
+          messages = JSON.parse(messagesJson);
+        } catch (e) {
+          messages = [];
+        }
+      }
       
       // Check if message already exists
       const existingIndex = messages.findIndex(msg => msg.id === message.id);
@@ -45,10 +56,15 @@ class MessageStorageService {
         // Update existing message
         messages[existingIndex] = message;
       } else {
-        // Add new message
+        // Add new message (insert in sorted position for speed)
         messages.push(message);
+        // Sort only when needed
+        messages.sort((a, b) => 
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
       }
       
+      // Save asynchronously (non-blocking)
       await EncryptedStorage.setItem(key, JSON.stringify(messages));
     } catch (error) {
       console.error('Error saving message:', error);

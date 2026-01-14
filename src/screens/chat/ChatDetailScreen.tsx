@@ -192,14 +192,15 @@ const ChatDetailScreen: React.FC = () => {
   };
 
   const setupMessageListener = () => {
-    chatService.onMessage(async (message: Message) => {
+    chatService.onMessage((message: Message) => {
       if (message.chatId === chatId) {
         if (message.isDeleted) {
-          // Remove deleted message from UI
+          // Remove deleted message from UI (immediate update)
           setMessages(prev => prev.filter(msg => msg.id !== message.id));
           return;
         }
         
+        // Optimistic UI update (immediate, non-blocking)
         setMessages(prev => {
           // Check if message already exists (avoid duplicates)
           const exists = prev.find(msg => msg.id === message.id);
@@ -213,18 +214,23 @@ const ChatDetailScreen: React.FC = () => {
           );
           return updated;
         });
-        scrollToBottom();
         
-        // Update chat storage with new message (for ChatsScreen)
-        await chatStorageService.updateChatWithMessage(chatId, message);
+        // Scroll to bottom immediately
+        requestAnimationFrame(() => scrollToBottom());
+        
+        // Update chat storage (non-blocking for speed)
+        chatStorageService.updateChatWithMessage(chatId, message).catch(err => 
+          console.error('Error updating chat:', err)
+        );
       }
     });
   };
 
   const scrollToBottom = () => {
-    setTimeout(() => {
+    // Use requestAnimationFrame for ultra-smooth scrolling
+    requestAnimationFrame(() => {
       flatListRef.current?.scrollToEnd({animated: true});
-    }, 100);
+    });
   };
 
   const handleSendText = async () => {

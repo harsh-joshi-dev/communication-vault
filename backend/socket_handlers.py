@@ -243,17 +243,23 @@ def register_socket_handlers(socketio_instance):
             # For non-app users, we don't track unread count
             chat.save()
             
-            # Emit to chat room (both sender and receiver will receive if they joined the chat room)
-            socketio_instance.emit('new_message', message.to_dict(), room=f'chat_{chat.id}')
+            # Emit to all relevant rooms simultaneously for ultra-fast delivery
+            message_dict = message.to_dict()
+            
+            # Emit to chat room (both sender and receiver)
+            socketio_instance.emit('new_message', message_dict, room=f'chat_{chat.id}')
             
             # Also notify receiver directly via device room (ensures delivery even if not in chat room)
             if receiver_id:
-                socketio_instance.emit('new_message', message.to_dict(), room=f'device_{receiver_id}')
-                # Mark as delivered if receiver is online
+                socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_id}')
+                socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_id}')
+                
+                # Mark as delivered immediately (optimistic)
                 message.status = 'delivered'
                 message.delivered_at = datetime.utcnow()
                 message.save()
-                # Emit status update to sender
+                
+                # Emit status update to sender immediately
                 socketio_instance.emit('message_status_update', {
                     'messageId': str(message.id),
                     'chatId': str(chat.id),
@@ -261,11 +267,11 @@ def register_socket_handlers(socketio_instance):
                     'deliveredAt': message.delivered_at.isoformat()
                 }, room=f'device_{device_id}')
             
-            # Also send message back to sender (so they see it in their chat)
-            socketio_instance.emit('new_message', message.to_dict(), room=f'device_{device_id}')
+            # Also send message back to sender (so they see it in their chat immediately)
+            socketio_instance.emit('new_message', message_dict, room=f'device_{device_id}')
             
-            # Return success response
-            return {'message': message.to_dict()}
+            # Return success response immediately
+            return {'message': message_dict}
             
         except Exception as e:
             print(f"Send message error: {e}")
