@@ -136,14 +136,19 @@ def register_socket_handlers(socketio_instance):
                     pass
             
             if not chat:
-                # Try to find existing chat by phone number or device ID
+                # Try to find existing chat by phone number, device ID, or unique code
                 receiver_device_id = data.get('receiverId')  # This is now deviceId
+                receiver_unique_code = data.get('receiverUniqueCode')  # Also check unique code
+                
                 if receiver_device_id:
                     # Try to find chat between these two devices
                     chat = Chat.objects(
                         (Chat.user1_id == device_id) & (Chat.user2_id == receiver_device_id)
                         | (Chat.user1_id == receiver_device_id) & (Chat.user2_id == device_id)
                     ).first()
+                
+                # If not found by device ID, try by unique code (if we have a way to map it)
+                # For now, we'll use receiver_device_id or receiverUniqueCode as receiver_id
                 elif phone_number:
                     chat = Chat.objects(
                         user1_id=device_id,
@@ -154,14 +159,19 @@ def register_socket_handlers(socketio_instance):
             if not chat:
                 # Create new chat
                 receiver_device_id = data.get('receiverId')
-                if receiver_device_id:
+                receiver_unique_code = data.get('receiverUniqueCode')
+                
+                # Use receiverUniqueCode if available, otherwise use receiverId
+                receiver_id = receiver_unique_code if receiver_unique_code else receiver_device_id
+                
+                if receiver_id:
                     # App user chat (device to device)
                     import uuid
                     new_chat_id = str(uuid.uuid4())
                     chat = Chat(
                         id=new_chat_id,
                         user1_id=device_id,
-                        user2_id=receiver_device_id,
+                        user2_id=receiver_id,  # Can be deviceId or uniqueCode
                         is_non_app_user=False,
                     )
                     chat.save()
