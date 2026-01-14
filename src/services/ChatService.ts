@@ -23,35 +23,36 @@ class ChatService {
     return this.socket;
   }
 
-  async connect() {
+  async connect(): Promise<void> {
     if (this.socket?.connected) {
-      return;
+      return Promise.resolve();
     }
 
-    // Get device info for authentication
-    const deviceInfo = await deviceService.getDeviceInfo();
+    return new Promise((resolve) => {
+      // Get device info for authentication
+      deviceService.getDeviceInfo().then(deviceInfo => {
+        // Update API URL for Android (physical device or emulator)
+        const apiUrl = __DEV__ && Platform.OS === 'android'
+          ? 'http://192.168.1.16:5001'
+          : (__DEV__ ? 'http://localhost:5001' : 'https://communication-vault.onrender.com');
 
-    // Update API URL for Android (physical device or emulator)
-    const apiUrl = __DEV__ && Platform.OS === 'android'
-      ? 'http://192.168.1.16:5001'
-      : (__DEV__ ? 'http://localhost:5001' : 'https://communication-vault.onrender.com');
+        this.socket = io(apiUrl, {
+          auth: {
+            deviceId: deviceInfo.deviceId,
+            uniqueCode: deviceInfo.uniqueCode,
+            deviceName: deviceInfo.deviceName,
+          },
+          transports: ['websocket'],
+        });
 
-    this.socket = io(apiUrl, {
-      auth: {
-        deviceId: deviceInfo.deviceId,
-        uniqueCode: deviceInfo.uniqueCode,
-        deviceName: deviceInfo.deviceName,
-      },
-      transports: ['websocket'],
-    });
+        this.socket.on('connect', () => {
+          console.log('Chat connected');
+          resolve();
+        });
 
-    this.socket.on('connect', () => {
-      console.log('Chat connected');
-    });
-
-    this.socket.on('disconnect', () => {
-      console.log('Chat disconnected');
-    });
+        this.socket.on('disconnect', () => {
+          console.log('Chat disconnected');
+        });
 
     this.socket.on('new_message', async (message: Message) => {
       // Store message locally
