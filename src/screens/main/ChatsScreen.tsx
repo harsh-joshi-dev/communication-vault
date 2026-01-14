@@ -23,7 +23,10 @@ const ChatsScreen: React.FC = () => {
   // Load chats when screen is focused (like WhatsApp)
   useFocusEffect(
     useCallback(() => {
-      loadChats();
+      // Connect chat service to receive messages
+      chatService.connect().then(() => {
+        loadChats();
+      });
       
       // Listen for new messages to update chat list
       const unsubscribe = chatService.onMessage(() => {
