@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Stealth Vault</string>
+    <string name="app_name_calculator">GST Calculator</string>
+    <string name="app_name_camera">Camera</string>
+    <string name="app_name_notes">Notes</string>
+    <string name="app_name_weather">Weather</string>
+    <string name="app_name_scanner">Scanner</string>
+</resources>
+

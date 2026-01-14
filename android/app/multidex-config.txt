@@ -1,0 +1,3 @@
+androidx.multidex.MultiDexApplication
+com.facebook.react.ReactApplication
+
