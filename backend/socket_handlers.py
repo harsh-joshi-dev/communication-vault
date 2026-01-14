@@ -115,8 +115,7 @@ def register_socket_handlers(socketio_instance):
             device_name = getattr(request, 'sid_device_name', 'Unknown Device')
             
             if not device_id:
-                emit('error', {'message': 'Not authenticated'})
-                return
+                return {'error': 'Not authenticated'}
             
             chat_id = data.get('chatId')
             message_type = data.get('type', 'text')
@@ -190,13 +189,11 @@ def register_socket_handlers(socketio_instance):
                     )
                     chat.save()
                 else:
-                    emit('error', {'message': 'Chat not found and cannot create without contact info'})
-                    return
+                    return {'error': 'Chat not found and cannot create without contact info'}
             
             # Verify device is part of chat
             if chat.user1_id != device_id and chat.user2_id != device_id:
-                emit('error', {'message': 'Chat not found'})
-                return
+                return {'error': 'Chat not found'}
             
             # Determine receiver
             if chat.is_non_app_user:
@@ -290,7 +287,8 @@ def register_socket_handlers(socketio_instance):
             
         except Exception as e:
             print(f"Send message error: {e}")
-            emit('error', {'message': str(e)}, callback=True)
+            import traceback
+            traceback.print_exc()
             return {'error': str(e)}
     
     @socketio_instance.on('typing')
