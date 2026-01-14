@@ -68,15 +68,25 @@ class ChatService {
         }, 20000);
 
         this.socket.on('connect', () => {
-          console.log('Chat connected successfully');
+          console.log('✅ Chat connected successfully');
+          console.log('Socket ID:', this.socket?.id);
           clearTimeout(connectionTimeout);
           resolve();
         });
 
         this.socket.on('connect_error', (error) => {
-          console.error('Connection error:', error);
+          console.error('❌ Connection error:', error);
+          console.error('Error details:', {
+            message: error.message,
+            description: error.description,
+            context: error.context,
+          });
           clearTimeout(connectionTimeout);
-          reject(new Error(`Connection failed: ${error.message}`));
+          reject(new Error(`Connection failed: ${error.message || 'Unknown error'}`));
+        });
+
+        this.socket.on('disconnect', (reason) => {
+          console.log('⚠️ Chat disconnected:', reason);
         });
 
         this.socket.on('connected', (data) => {
