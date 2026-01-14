@@ -40,30 +40,47 @@ def init_mongodb():
     
     while retry_count < max_retries:
         try:
-            # Parse URI and extract connection parameters
             uri = Config.MONGODB_URI
             
-            # Try connecting with mongoengine
+            # Validate URI format
+            if not uri or not uri.startswith('mongodb'):
+                print(f"Invalid MongoDB URI format: {uri}")
+                return False
+            
+            # Try connecting with mongoengine (lazy connection)
             connect(
                 db=Config.MONGODB_DB_NAME,
                 host=uri,
                 alias='default',
                 connect=False,  # Lazy connection - connect on first use
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=5000,
-                socketTimeoutMS=5000,
+                serverSelectionTimeoutMS=10000,
+                connectTimeoutMS=10000,
+                socketTimeoutMS=10000,
             )
-            print(f"MongoDB connection initialized for database: {Config.MONGODB_DB_NAME}")
+            print(f"✅ MongoDB connection initialized for database: {Config.MONGODB_DB_NAME}")
+            print(f"   URI: {uri.split('@')[1] if '@' in uri else 'hidden'}")
             return True
         except Exception as e:
             retry_count += 1
-            print(f"MongoDB connection attempt {retry_count}/{max_retries} failed: {e}")
+            error_msg = str(e)
+            print(f"❌ MongoDB connection attempt {retry_count}/{max_retries} failed: {error_msg}")
+            
+            # Check if it's a DNS error
+            if 'DNS query name does not exist' in error_msg or 'does not exist' in error_msg:
+                print("   ⚠️  DNS Error: The MongoDB cluster may not exist or is paused.")
+                print("   💡 Solutions:")
+                print("      1. Verify cluster exists in MongoDB Atlas")
+                print("      2. Check if cluster is paused (free tier) - click 'Resume'")
+                print("      3. Get correct connection string from Atlas 'Connect' button")
+                print("      4. Verify cluster name matches in connection string")
+            
             if retry_count >= max_retries:
-                print(f"MongoDB connection error after {max_retries} attempts: {e}")
-                print("App will continue but MongoDB operations may fail. Check your MONGODB_URI.")
+                print(f"\n❌ MongoDB connection failed after {max_retries} attempts")
+                print("   App will continue but MongoDB operations will fail.")
+                print("   Please check your MONGODB_URI in Render environment variables.")
                 return False
             import time
-            time.sleep(2)  # Wait before retry
+            time.sleep(3)  # Wait before retry
     
     return False
 
