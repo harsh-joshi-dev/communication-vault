@@ -35,11 +35,8 @@ class ChatService {
     return new Promise((resolve, reject) => {
       // Get device info for authentication
       deviceService.getDeviceInfo().then(deviceInfo => {
-        // Use production URL (Render) - local dev server not needed for device testing
-        // If you need local dev, update the IP address below
-        const apiUrl = __DEV__ && Platform.OS === 'android'
-          ? 'https://communication-vault.onrender.com' // Use production URL for now
-          : (__DEV__ ? 'https://communication-vault.onrender.com' : 'https://communication-vault.onrender.com');
+        // Always use Render production URL
+        const apiUrl = 'https://communication-vault.onrender.com';
 
         console.log(`Connecting to chat server: ${apiUrl}`);
 
@@ -49,11 +46,14 @@ class ChatService {
             uniqueCode: deviceInfo.uniqueCode,
             deviceName: deviceInfo.deviceName,
           },
-          transports: ['websocket'],
+          transports: ['websocket', 'polling'], // Try both websocket and polling for better compatibility
           reconnection: true,
-          reconnectionAttempts: 5,
-          reconnectionDelay: 1000,
-          timeout: 20000,
+          reconnectionAttempts: 10,
+          reconnectionDelay: 2000,
+          reconnectionDelayMax: 10000,
+          timeout: 30000,
+          forceNew: false,
+          upgrade: true,
         });
 
         // Set up connection timeout
