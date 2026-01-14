@@ -83,85 +83,108 @@ class ChatService {
           console.log('Chat disconnected');
         });
 
-        this.socket.on('new_message', async (message: Message) => {
-          // Store message locally (non-blocking for speed)
-          messageStorageService.saveMessage(message).catch(err => 
-            console.error('Error saving message:', err)
+        this.socket.on('connected', (data) => {
+          console.log('Connection confirmed:', data);
+        });
+
+        // Set up event listeners
+        this.setupEventListeners();
+
+        // If socket is already connected, resolve immediately
+        if (this.socket.connected) {
+          console.log('Socket already connected');
+          clearTimeout(connectionTimeout);
+          resolve();
+        }
+      }).catch((error) => {
+        console.error('Error getting device info:', error);
+        reject(error);
+      });
+    });
+  }
+
+  private setupEventListeners() {
+    if (!this.socket) return;
+
+    this.socket.on('new_message', async (message: Message) => {
+      // Store message locally (non-blocking for speed)
+      messageStorageService.saveMessage(message).catch(err => 
+        console.error('Error saving message:', err)
+      );
+      
+      // Ensure chat exists for this message (create if needed)
+      try {
+        const {chatStorageService} = await import('./ChatStorageService');
+        const {deviceService} = await import('./DeviceService');
+        const currentDevice = await deviceService.getDeviceInfo();
+        
+        // Check if chat exists
+        const chats = await chatStorageService.getChats();
+        let chat = chats.find(c => c.id === message.chatId);
+        
+        if (!chat && message.senderId !== currentDevice.deviceId) {
+          // Create chat for unknown device
+          const senderDeviceId = message.senderId;
+          const senderUniqueCode = message.senderId.substring(0, 8).toUpperCase(); // Use first 8 chars as code
+          const senderName = `Device ${senderUniqueCode}`; // Show as "Device XXXXXXXX"
+          
+          chat = await chatStorageService.getOrCreateChat(
+            senderDeviceId,
+            senderName,
+            senderUniqueCode
           );
           
-          // Ensure chat exists for this message (create if needed)
-          try {
-            const {chatStorageService} = await import('./ChatStorageService');
-            const {deviceService} = await import('./DeviceService');
-            const currentDevice = await deviceService.getDeviceInfo();
-            
-            // Check if chat exists
-            const chats = await chatStorageService.getChats();
-            let chat = chats.find(c => c.id === message.chatId);
-            
-            if (!chat && message.senderId !== currentDevice.deviceId) {
-              // Create chat for unknown device
-              const senderDeviceId = message.senderId;
-              const senderUniqueCode = message.senderId.substring(0, 8).toUpperCase(); // Use first 8 chars as code
-              const senderName = `Device ${senderUniqueCode}`; // Show as "Device XXXXXXXX"
-              
-              chat = await chatStorageService.getOrCreateChat(
-                senderDeviceId,
-                senderName,
-                senderUniqueCode
-              );
-              
-              // Update message chatId if chat was created with different ID
-              if (chat.id !== message.chatId) {
-                message.chatId = chat.id;
-                await messageStorageService.saveMessage(message);
-              }
-            }
-            
-            // Update chat with message (increments unread count if from other user)
-            if (chat) {
-              await chatStorageService.updateChatWithMessage(chat.id, message);
-            }
-          } catch (error) {
-            console.error('Error ensuring chat exists:', error);
+          // Update message chatId if chat was created with different ID
+          if (chat.id !== message.chatId) {
+            message.chatId = chat.id;
+            await messageStorageService.saveMessage(message);
           }
-          
-          // Notify listeners immediately (optimistic update)
-          this.messageListeners.forEach(listener => listener(message));
-        });
+        }
+        
+        // Update chat with message (increments unread count if from other user)
+        if (chat) {
+          await chatStorageService.updateChatWithMessage(chat.id, message);
+        }
+      } catch (error) {
+        console.error('Error ensuring chat exists:', error);
+      }
+      
+      // Notify listeners immediately (optimistic update)
+      this.messageListeners.forEach(listener => listener(message));
+    });
 
-        this.socket.on('chat_updated', (chat: Chat) => {
-          this.chatListeners.forEach(listener => listener(chat));
-        });
+    this.socket.on('chat_updated', (chat: Chat) => {
+      this.chatListeners.forEach(listener => listener(chat));
+    });
 
-        // Listen for message status updates
-        this.socket.on('message_status_update', async (update: {
-          messageId: string;
-          chatId: string;
-          status: Message['status'];
-          deliveredAt?: string;
-          readAt?: string;
-        }) => {
-          // Update local storage (non-blocking)
-          messageStorageService.updateMessageStatus(
-            update.chatId,
-            update.messageId,
-            update.status,
-            update.deliveredAt,
-            update.readAt,
-          ).catch(err => console.error('Error updating status:', err));
-          
-          // Notify listeners immediately
-          this.messageStatusListeners.forEach(listener => listener(update));
-        });
+    // Listen for message status updates
+    this.socket.on('message_status_update', async (update: {
+      messageId: string;
+      chatId: string;
+      status: Message['status'];
+      deliveredAt?: string;
+      readAt?: string;
+    }) => {
+      // Update local storage (non-blocking)
+      messageStorageService.updateMessageStatus(
+        update.chatId,
+        update.messageId,
+        update.status,
+        update.deliveredAt,
+        update.readAt,
+      ).catch(err => console.error('Error updating status:', err));
+      
+      // Notify listeners immediately
+      this.messageStatusListeners.forEach(listener => listener(update));
+    });
 
-        // Listen for message deletion
-        this.socket.on('message_deleted', async (data: {chatId: string; messageId: string}) => {
-          messageStorageService.deleteMessage(data.chatId, data.messageId).catch(err => 
-            console.error('Error deleting message:', err)
-          );
-          // Notify listeners immediately
-          this.messageListeners.forEach(listener => {
+    // Listen for message deletion
+    this.socket.on('message_deleted', async (data: {chatId: string; messageId: string}) => {
+      messageStorageService.deleteMessage(data.chatId, data.messageId).catch(err => 
+        console.error('Error deleting message:', err)
+      );
+      // Notify listeners immediately
+      this.messageListeners.forEach(listener => {
         const deletedMessage: Message = {
           id: data.messageId,
           chatId: data.chatId,
@@ -174,9 +197,7 @@ class ChatService {
           status: 'sent',
           createdAt: new Date().toISOString(),
         };
-            listener(deletedMessage);
-          });
-        });
+        listener(deletedMessage);
       });
     });
   }
