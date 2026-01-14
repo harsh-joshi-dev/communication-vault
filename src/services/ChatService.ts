@@ -74,12 +74,12 @@ class ChatService {
           resolve();
         });
 
-        this.socket.on('connect_error', (error) => {
+        this.socket.on('connect_error', (error: any) => {
           console.error('❌ Connection error:', error);
           console.error('Error details:', {
             message: error.message,
-            description: error.description,
-            context: error.context,
+            type: error.type,
+            data: error.data,
           });
           clearTimeout(connectionTimeout);
           reject(new Error(`Connection failed: ${error.message || 'Unknown error'}`));
