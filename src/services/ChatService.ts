@@ -39,10 +39,11 @@ class ChatService {
     return new Promise((resolve, reject) => {
       // Get device info for authentication
       deviceService.getDeviceInfo().then(deviceInfo => {
-        // Update API URL for Android (physical device or emulator)
+        // Use production URL (Render) - local dev server not needed for device testing
+        // If you need local dev, update the IP address below
         const apiUrl = __DEV__ && Platform.OS === 'android'
-          ? 'http://192.168.1.16:5001'
-          : (__DEV__ ? 'http://localhost:5001' : 'https://communication-vault.onrender.com');
+          ? 'https://communication-vault.onrender.com' // Use production URL for now
+          : (__DEV__ ? 'https://communication-vault.onrender.com' : 'https://communication-vault.onrender.com');
 
         console.log(`Connecting to chat server: ${apiUrl}`);
 
