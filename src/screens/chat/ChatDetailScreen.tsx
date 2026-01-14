@@ -60,11 +60,23 @@ const ChatDetailScreen: React.FC = () => {
     
     // Connect chat service with device ID
     chatService.connect().then(() => {
+      console.log('Chat service connected successfully');
       // After connection, setup listeners and join chat
       setupMessageListener();
       setupTypingListener();
       setupStatusUpdateListener();
       joinChat();
+    }).catch((error) => {
+      console.error('Failed to connect chat service:', error);
+      // Retry connection after a delay
+      setTimeout(() => {
+        chatService.connect().then(() => {
+          setupMessageListener();
+          setupTypingListener();
+          setupStatusUpdateListener();
+          joinChat();
+        }).catch(err => console.error('Retry connection failed:', err));
+      }, 3000);
     });
     
     // Mark chat as read when opening

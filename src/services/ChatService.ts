@@ -32,16 +32,19 @@ class ChatService {
 
   async connect(): Promise<void> {
     if (this.socket?.connected) {
+      console.log('Socket already connected');
       return Promise.resolve();
     }
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       // Get device info for authentication
       deviceService.getDeviceInfo().then(deviceInfo => {
         // Update API URL for Android (physical device or emulator)
         const apiUrl = __DEV__ && Platform.OS === 'android'
           ? 'http://192.168.1.16:5001'
           : (__DEV__ ? 'http://localhost:5001' : 'https://communication-vault.onrender.com');
+
+        console.log(`Connecting to chat server: ${apiUrl}`);
 
         this.socket = io(apiUrl, {
           auth: {
@@ -50,11 +53,30 @@ class ChatService {
             deviceName: deviceInfo.deviceName,
           },
           transports: ['websocket'],
+          reconnection: true,
+          reconnectionAttempts: 5,
+          reconnectionDelay: 1000,
+          timeout: 20000,
         });
 
+        // Set up connection timeout
+        const connectionTimeout = setTimeout(() => {
+          if (!this.socket?.connected) {
+            console.error('Connection timeout - socket not connected');
+            reject(new Error('Connection timeout'));
+          }
+        }, 20000);
+
         this.socket.on('connect', () => {
-          console.log('Chat connected');
+          console.log('Chat connected successfully');
+          clearTimeout(connectionTimeout);
           resolve();
+        });
+
+        this.socket.on('connect_error', (error) => {
+          console.error('Connection error:', error);
+          clearTimeout(connectionTimeout);
+          reject(new Error(`Connection failed: ${error.message}`));
         });
 
         this.socket.on('disconnect', () => {

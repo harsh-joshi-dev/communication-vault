@@ -25,7 +25,16 @@ const ChatsScreen: React.FC = () => {
     useCallback(() => {
       // Connect chat service to receive messages
       chatService.connect().then(() => {
+        console.log('Chat service connected in ChatsScreen');
         loadChats();
+      }).catch((error) => {
+        console.error('Failed to connect chat service:', error);
+        // Still load chats even if connection fails
+        loadChats();
+        // Retry connection
+        setTimeout(() => {
+          chatService.connect().catch(err => console.error('Retry connection failed:', err));
+        }, 3000);
       });
       
       // Listen for new messages to update chat list
