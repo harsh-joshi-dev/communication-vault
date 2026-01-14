@@ -194,8 +194,8 @@ class ChatService {
 
       // Use HTTP API for creating chat (more reliable)
       const apiUrl = __DEV__ && Platform.OS === 'android'
-        ? 'http://10.0.2.2:5000'
-        : API_BASE_URL;
+        ? 'http://192.168.1.16:5001'
+        : (__DEV__ ? 'http://localhost:5001' : 'https://communication-vault.onrender.com');
 
       // For now, we'll create chat via socket or handle it in the component
       // The backend will create chat automatically when first message is sent
