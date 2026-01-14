@@ -57,18 +57,19 @@ const ChatDetailScreen: React.FC = () => {
     deviceService.getDeviceId().then(id => setCurrentDeviceId(id));
     
     // Connect chat service with device ID
-    chatService.connect();
+    chatService.connect().then(() => {
+      // After connection, setup listeners and join chat
+      setupMessageListener();
+      setupTypingListener();
+      setupStatusUpdateListener();
+      joinChat();
+    });
     
     // Mark chat as read when opening
     chatStorageService.markChatAsRead(chatId);
     
-    // Load messages and setup listener
-    // Chat will be created automatically when first message is sent
+    // Load messages
     loadMessages();
-    setupMessageListener();
-    setupTypingListener();
-    setupStatusUpdateListener();
-    joinChat();
 
     return () => {
       chatService.onMessage(() => {})(); // Cleanup
