@@ -1,0 +1,35 @@
+"""
+Setup file for Stealth Vault Backend
+"""
+from setuptools import setup, find_packages
+
+setup(
+    name="stealth-vault-backend",
+    version="1.0.0",
+    description="Stealth Vault App Backend API",
+    author="Stealth Vault Team",
+    packages=find_packages(),
+    install_requires=[
+        "Flask==3.0.0",
+        "Flask-SocketIO==5.3.6",
+        "Flask-CORS==4.0.0",
+        "Flask-JWT-Extended==4.6.0",
+        "werkzeug==3.0.1",
+        "pymongo==4.6.1",
+        "mongoengine==0.27.0",
+        "python-socketio==5.10.0",
+        "eventlet==0.33.3",
+        "python-jose[cryptography]==3.3.0",
+        "passlib[bcrypt]==1.7.4",
+        "python-dotenv==1.0.0",
+        "Pillow==10.1.0",
+        "qrcode==7.4.2",
+        "pyotp==2.9.0",
+        "boto3==1.29.7",
+        "redis==5.0.1",
+        "celery==5.3.4",
+        "gunicorn==21.2.0",
+    ],
+    python_requires=">=3.11,<3.12",
+)
+
