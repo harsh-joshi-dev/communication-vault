@@ -67,6 +67,43 @@ class ChatService {
             console.error('Error saving message:', err)
           );
           
+          // Ensure chat exists for this message (create if needed)
+          try {
+            const {chatStorageService} = await import('./ChatStorageService');
+            const {deviceService} = await import('./DeviceService');
+            const currentDevice = await deviceService.getDeviceInfo();
+            
+            // Check if chat exists
+            const chats = await chatStorageService.getChats();
+            let chat = chats.find(c => c.id === message.chatId);
+            
+            if (!chat && message.senderId !== currentDevice.deviceId) {
+              // Create chat for unknown device
+              const senderDeviceId = message.senderId;
+              const senderUniqueCode = message.senderId.substring(0, 8).toUpperCase(); // Use first 8 chars as code
+              const senderName = `Device ${senderUniqueCode}`; // Show as "Device XXXXXXXX"
+              
+              chat = await chatStorageService.getOrCreateChat(
+                senderDeviceId,
+                senderName,
+                senderUniqueCode
+              );
+              
+              // Update message chatId if chat was created with different ID
+              if (chat.id !== message.chatId) {
+                message.chatId = chat.id;
+                await messageStorageService.saveMessage(message);
+              }
+            }
+            
+            // Update chat with message (increments unread count if from other user)
+            if (chat) {
+              await chatStorageService.updateChatWithMessage(chat.id, message);
+            }
+          } catch (error) {
+            console.error('Error ensuring chat exists:', error);
+          }
+          
           // Notify listeners immediately (optimistic update)
           this.messageListeners.forEach(listener => listener(message));
         });

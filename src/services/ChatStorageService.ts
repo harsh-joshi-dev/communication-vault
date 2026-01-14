@@ -109,23 +109,54 @@ class ChatStorageService {
   async updateChatWithMessage(chatId: string, message: Message): Promise<void> {
     try {
       const chats = await this.getChats();
-      const chatIndex = chats.findIndex(chat => chat.id === chatId);
+      const currentDeviceId = await this.getCurrentDeviceId();
+      
+      // Try to find chat by ID first
+      let chatIndex = chats.findIndex(chat => chat.id === chatId);
+      
+      // If not found, try to find by participant IDs
+      if (chatIndex < 0) {
+        chatIndex = chats.findIndex(chat => 
+          chat.participantIds?.includes(message.senderId) || 
+          chat.participantIds?.includes(message.receiverId)
+        );
+      }
       
       if (chatIndex >= 0) {
         chats[chatIndex].lastMessage = message;
         chats[chatIndex].updatedAt = new Date().toISOString();
         
         // Increment unread count if message is from other user
-        const currentDeviceId = await this.getCurrentDeviceId();
-        if (message.senderId !== currentDeviceId) {
+        if (message.senderId !== currentDeviceId && !message.isDeleted) {
           chats[chatIndex].unreadCount = (chats[chatIndex].unreadCount || 0) + 1;
         }
         
         await this.saveChats(chats);
       } else {
-        // Chat doesn't exist, create it
-        // This shouldn't happen, but handle it gracefully
-        console.warn(`Chat ${chatId} not found when updating with message`);
+        // Chat doesn't exist, create it for unknown device
+        if (message.senderId !== currentDeviceId) {
+          const senderDeviceId = message.senderId;
+          const senderUniqueCode = senderDeviceId.substring(0, 8).toUpperCase();
+          const senderName = `Device ${senderUniqueCode}`;
+          
+          const newChat = await this.getOrCreateChat(
+            senderDeviceId,
+            senderName,
+            senderUniqueCode
+          );
+          
+          // Update with message
+          newChat.lastMessage = message;
+          newChat.updatedAt = new Date().toISOString();
+          newChat.unreadCount = 1; // First message is unread
+          
+          const updatedChats = await this.getChats();
+          const newChatIndex = updatedChats.findIndex(chat => chat.id === newChat.id);
+          if (newChatIndex >= 0) {
+            updatedChats[newChatIndex] = newChat;
+            await this.saveChats(updatedChats);
+          }
+        }
       }
     } catch (error) {
       console.error('Error updating chat with message:', error);

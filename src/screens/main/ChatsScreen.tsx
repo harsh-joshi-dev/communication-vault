@@ -13,6 +13,7 @@ import Icon from 'react-native-vector-icons/Ionicons';
 import {Chat, Message} from '../../types';
 import {format} from 'date-fns';
 import {chatStorageService} from '../../services/ChatStorageService';
+import {chatService} from '../../services/ChatService';
 
 const ChatsScreen: React.FC = () => {
   const navigation = useNavigation<any>();
@@ -23,6 +24,16 @@ const ChatsScreen: React.FC = () => {
   useFocusEffect(
     useCallback(() => {
       loadChats();
+      
+      // Listen for new messages to update chat list
+      const unsubscribe = chatService.onMessage(() => {
+        // Reload chats when new message arrives
+        loadChats();
+      });
+      
+      return () => {
+        unsubscribe();
+      };
     }, [])
   );
 
