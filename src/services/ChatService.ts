@@ -7,12 +7,8 @@ import {deviceService} from './DeviceService';
 import {messageStorageService} from './MessageStorageService';
 import axios from 'axios';
 
-// Backend API URL - Update this to your server URL
-// For Android physical device, use your computer's IP address
-// For Android emulator, use 10.0.2.2
-const API_BASE_URL = __DEV__
-  ? (Platform.OS === 'android' ? 'http://192.168.1.16:5001' : 'http://localhost:5001')
-  : 'https://communication-vault.onrender.com';
+// Backend API URL - Using Render production URL
+const API_BASE_URL = 'https://communication-vault.onrender.com';
 
 class ChatService {
   private socket: Socket | null = null;
