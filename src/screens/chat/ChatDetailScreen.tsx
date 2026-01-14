@@ -267,9 +267,11 @@ const ChatDetailScreen: React.FC = () => {
 
     try {
       // Support both app users and non-app contacts
+      // Use receiverUniqueCode if available (device-based), otherwise use receiverId
+      const receiver = receiverUniqueCode || receiverId || undefined;
       const sentMessage = await chatService.sendMessage(
         chatId,
-        receiverId || undefined,
+        receiver,
         'text',
         messageText,
         undefined,
