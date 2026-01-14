@@ -91,15 +91,20 @@ const ChatsScreen: React.FC = () => {
             )}
           </View>
           {item.lastMessage && (
-            <Text style={styles.lastMessage} numberOfLines={1}>
+            <Text 
+              style={[
+                styles.lastMessage,
+                item.unreadCount > 0 && styles.unreadLastMessage
+              ]} 
+              numberOfLines={1}>
               {item.lastMessage.type === 'text'
                 ? item.lastMessage.content
                 : item.lastMessage.type === 'image'
                 ? '📷 Photo'
                 : item.lastMessage.type === 'video'
                 ? '🎥 Video'
-                : item.lastMessage.type === 'audio'
-                ? '🎤 Audio'
+                : item.lastMessage.type === 'voice'
+                ? '🎤 Voice'
                 : item.lastMessage.type === 'document'
                 ? '📄 Document'
                 : `📎 ${item.lastMessage.type}`}
@@ -239,6 +244,10 @@ const styles = StyleSheet.create({
   lastMessage: {
     fontSize: 14,
     color: '#666',
+  },
+  unreadLastMessage: {
+    fontWeight: '600',
+    color: '#333',
   },
   emptyContainer: {
     flex: 1,
