@@ -53,7 +53,7 @@ const QRScannerScreen: React.FC = () => {
       // Don't allow adding yourself
       if (data.uniqueCode === currentDeviceInfo.uniqueCode) {
         Alert.alert(
-          'Cannot Add Yourself',
+          'Cannot Chat With Yourself',
           'This is your own QR code. Please scan someone else\'s QR code.',
           [
             {
@@ -68,57 +68,23 @@ const QRScannerScreen: React.FC = () => {
         return;
       }
 
-      // Store contact locally (no backend needed)
-      const contactsKey = 'device_contacts';
-      const existingContactsJson = await EncryptedStorage.getItem(contactsKey);
-      const existingContacts: Contact[] = existingContactsJson 
-        ? JSON.parse(existingContactsJson) 
-        : [];
-
-      // Check if contact already exists
-      const existingContact = existingContacts.find(
-        c => c.uniqueCode === data.uniqueCode
+      // Import chat storage service
+      const {chatStorageService} = await import('../../services/ChatStorageService');
+      
+      // Create or get chat (like WhatsApp - directly creates chat, not contact)
+      const chat = await chatStorageService.getOrCreateChat(
+        data.deviceId,
+        data.deviceName || `Device ${data.uniqueCode}`,
+        data.uniqueCode
       );
 
-      if (existingContact) {
-        Alert.alert(
-          'Contact Already Added',
-          `${data.deviceName || 'This device'} is already in your contacts`,
-          [
-            {
-              text: 'OK',
-              onPress: () => navigation.goBack(),
-            },
-          ],
-        );
-        return;
-      }
-
-      // Create new contact
-      const newContact: Contact = {
-        id: uuidv4(),
-        uniqueCode: data.uniqueCode,
-        deviceId: data.deviceId,
-        name: data.deviceName || `Device ${data.uniqueCode}`,
+      // Navigate directly to chat screen (like WhatsApp)
+      (navigation as any).navigate('ChatDetail', {
+        chatId: chat.id,
+        contactName: data.deviceName || `Device ${data.uniqueCode}`,
+        receiverId: data.deviceId,
         isAppUser: true,
-        isInvited: false,
-        createdAt: new Date().toISOString(),
-      };
-
-      // Add to contacts
-      existingContacts.push(newContact);
-      await EncryptedStorage.setItem(contactsKey, JSON.stringify(existingContacts));
-
-      Alert.alert(
-        'Contact Added',
-        `${data.deviceName || 'Device'} has been added to your contacts`,
-        [
-          {
-            text: 'OK',
-            onPress: () => navigation.goBack(),
-          },
-        ],
-      );
+      });
     } catch (error: any) {
       console.error('QR scan error:', error);
       Alert.alert(

@@ -18,6 +18,7 @@ import {Message} from '../../types';
 import {format} from 'date-fns';
 import {chatService} from '../../services/ChatService';
 import {deviceService} from '../../services/DeviceService';
+import {chatStorageService} from '../../services/ChatStorageService';
 import {launchImageLibrary} from 'react-native-image-picker';
 import DocumentPicker from 'react-native-document-picker';
 import AudioRecorderPlayer from 'react-native-audio-recorder-player';
@@ -54,6 +55,9 @@ const ChatDetailScreen: React.FC = () => {
   useEffect(() => {
     // Connect chat service with device ID
     chatService.connect();
+    
+    // Mark chat as read when opening
+    chatStorageService.markChatAsRead(chatId);
     
     // Load messages and setup listener
     // Chat will be created automatically when first message is sent
@@ -179,10 +183,13 @@ const ChatDetailScreen: React.FC = () => {
   };
 
   const setupMessageListener = () => {
-    chatService.onMessage((message: Message) => {
+    chatService.onMessage(async (message: Message) => {
       if (message.chatId === chatId) {
         setMessages(prev => [...prev, message]);
         scrollToBottom();
+        
+        // Update chat storage with new message (for ChatsScreen)
+        await chatStorageService.updateChatWithMessage(chatId, message);
       }
     });
   };
@@ -244,6 +251,9 @@ const ChatDetailScreen: React.FC = () => {
         msg.id === tempMessageId ? {...sentMessage, status: sentMessage.status || 'sent'} : msg
       ));
       
+      // Update chat storage with new message (for ChatsScreen)
+      await chatStorageService.updateChatWithMessage(chatId, sentMessage);
+      
       // Mark messages as read if receiver is viewing
       if (receiverId) {
         setTimeout(() => {
@@ -271,7 +281,7 @@ const ChatDetailScreen: React.FC = () => {
           if (response.assets && response.assets[0]) {
             const asset = response.assets[0];
             try {
-              await chatService.sendMessage(
+              const sentMessage = await chatService.sendMessage(
                 chatId,
                 receiverId || undefined,
                 'image',
@@ -286,6 +296,7 @@ const ChatDetailScreen: React.FC = () => {
                   email,
                 },
               );
+              await chatStorageService.updateChatWithMessage(chatId, sentMessage);
               scrollToBottom();
             } catch (error: any) {
               Alert.alert('Error', error?.message || 'Failed to send image');
@@ -309,7 +320,7 @@ const ChatDetailScreen: React.FC = () => {
           if (response.assets && response.assets[0]) {
             const asset = response.assets[0];
             try {
-              await chatService.sendMessage(
+              const sentMessage = await chatService.sendMessage(
                 chatId,
                 receiverId || undefined,
                 'video',
@@ -325,6 +336,7 @@ const ChatDetailScreen: React.FC = () => {
                   email,
                 },
               );
+              await chatStorageService.updateChatWithMessage(chatId, sentMessage);
               scrollToBottom();
             } catch (error: any) {
               Alert.alert('Error', error?.message || 'Failed to send video');
@@ -346,7 +358,7 @@ const ChatDetailScreen: React.FC = () => {
       if (result.length > 0) {
         const file = result[0];
         try {
-          await chatService.sendMessage(
+          const sentMessage = await chatService.sendMessage(
             chatId,
             receiverId || undefined,
             'document',
@@ -361,6 +373,7 @@ const ChatDetailScreen: React.FC = () => {
               email,
             },
           );
+          await chatStorageService.updateChatWithMessage(chatId, sentMessage);
           scrollToBottom();
         } catch (error: any) {
           Alert.alert('Error', error?.message || 'Failed to send document');
@@ -412,7 +425,7 @@ const ChatDetailScreen: React.FC = () => {
 
       if (result && duration > 0) {
         try {
-          await chatService.sendMessage(
+          const sentMessage = await chatService.sendMessage(
             chatId,
             receiverId || undefined,
             'voice',
@@ -427,6 +440,7 @@ const ChatDetailScreen: React.FC = () => {
               email,
             },
           );
+          await chatStorageService.updateChatWithMessage(chatId, sentMessage);
         } catch (error: any) {
           Alert.alert('Error', error?.message || 'Failed to send voice message');
         }

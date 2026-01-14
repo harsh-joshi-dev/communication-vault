@@ -1,4 +1,4 @@
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useCallback} from 'react';
 import {
   View,
   Text,
@@ -7,32 +7,44 @@ import {
   TouchableOpacity,
   Image,
 } from 'react-native';
-import {useNavigation} from '@react-navigation/native';
-import {BottomTabNavigationProp} from '@react-navigation/bottom-tabs';
+import {useNavigation, useFocusEffect} from '@react-navigation/native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/Ionicons';
 import {Chat, Message} from '../../types';
 import {format} from 'date-fns';
-
-type NavigationProp = CompositeNavigationProp<
-  StackNavigationProp<any>,
-  BottomTabNavigationProp<any>
->;
+import {chatStorageService} from '../../services/ChatStorageService';
 
 const ChatsScreen: React.FC = () => {
-  const navigation = useNavigation<NavigationProp>();
+  const navigation = useNavigation<any>();
   const [chats, setChats] = useState<Chat[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // Mock data for now
-  useEffect(() => {
-    // In production, fetch from service
-    setChats([]);
-  }, []);
+  // Load chats when screen is focused (like WhatsApp)
+  useFocusEffect(
+    useCallback(() => {
+      loadChats();
+    }, [])
+  );
+
+  const loadChats = async () => {
+    try {
+      setLoading(true);
+      const loadedChats = await chatStorageService.getChats();
+      setChats(loadedChats);
+    } catch (error) {
+      console.error('Error loading chats:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const renderChatItem = ({item}: {item: Chat}) => {
     const lastMessageTime = item.lastMessage
       ? format(new Date(item.lastMessage.createdAt), 'HH:mm')
       : '';
+    
+    const contactName = item.otherUser?.name || 'Unknown Device';
+    const contactAvatar = item.otherUser?.avatar;
 
     return (
       <TouchableOpacity
@@ -40,11 +52,17 @@ const ChatsScreen: React.FC = () => {
         onPress={() => {
           navigation.navigate('ChatDetail' as never, {
             chatId: item.id,
-            contactName: 'Contact Name',
+            contactName: contactName,
+            receiverId: item.otherUser?.id || item.participantIds?.[0],
+            isAppUser: item.otherUser?.isAppUser || false,
           } as never);
         }}>
         <View style={styles.avatarContainer}>
-          <Icon name="person-circle" size={50} color="#2196F3" />
+          {contactAvatar ? (
+            <Image source={{uri: contactAvatar}} style={styles.avatar} />
+          ) : (
+            <Icon name="person-circle" size={50} color="#2196F3" />
+          )}
           {item.unreadCount > 0 && (
             <View style={styles.badge}>
               <Text style={styles.badgeText}>
@@ -55,7 +73,7 @@ const ChatsScreen: React.FC = () => {
         </View>
         <View style={styles.chatInfo}>
           <View style={styles.chatHeader}>
-            <Text style={styles.chatName}>Contact Name</Text>
+            <Text style={styles.chatName}>{contactName}</Text>
             {lastMessageTime && (
               <Text style={styles.chatTime}>{lastMessageTime}</Text>
             )}
@@ -64,6 +82,14 @@ const ChatsScreen: React.FC = () => {
             <Text style={styles.lastMessage} numberOfLines={1}>
               {item.lastMessage.type === 'text'
                 ? item.lastMessage.content
+                : item.lastMessage.type === 'image'
+                ? '📷 Photo'
+                : item.lastMessage.type === 'video'
+                ? '🎥 Video'
+                : item.lastMessage.type === 'audio'
+                ? '🎤 Audio'
+                : item.lastMessage.type === 'document'
+                ? '📄 Document'
                 : `📎 ${item.lastMessage.type}`}
             </Text>
           )}
@@ -88,12 +114,16 @@ const ChatsScreen: React.FC = () => {
           <Icon name="settings" size={24} color="#2196F3" />
         </TouchableOpacity>
       </View>
-      {chats.length === 0 ? (
+      {loading ? (
+        <View style={styles.emptyContainer}>
+          <Text style={styles.emptyText}>Loading chats...</Text>
+        </View>
+      ) : chats.length === 0 ? (
         <View style={styles.emptyContainer}>
           <Icon name="chatbubbles-outline" size={80} color="#ccc" />
           <Text style={styles.emptyText}>No chats yet</Text>
           <Text style={styles.emptySubtext}>
-            Start a conversation from Contacts
+            Scan a QR code to start chatting
           </Text>
         </View>
       ) : (
@@ -102,14 +132,17 @@ const ChatsScreen: React.FC = () => {
           renderItem={renderChatItem}
           keyExtractor={item => item.id}
           contentContainerStyle={styles.listContent}
+          refreshing={loading}
+          onRefresh={loadChats}
         />
       )}
       <TouchableOpacity
         style={styles.fab}
         onPress={() => {
-          navigation.navigate('Contacts' as never);
+          // Navigate to QR Scanner to scan and start chat
+          navigation.navigate('QRScanner' as never);
         }}>
-        <Icon name="add" size={28} color="#fff" />
+        <Icon name="qr-code" size={28} color="#fff" />
       </TouchableOpacity>
     </SafeAreaView>
   );
@@ -212,6 +245,11 @@ const styles = StyleSheet.create({
     color: '#ccc',
     marginTop: 10,
     textAlign: 'center',
+  },
+  avatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
   },
   fab: {
     position: 'absolute',

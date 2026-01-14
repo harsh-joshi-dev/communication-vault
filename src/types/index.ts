@@ -68,7 +68,14 @@ export interface Message {
 
 export interface Chat {
   id: string;
-  participantIds: string[];
+  participantIds?: string[];
+  otherUser?: {
+    id?: string;
+    name?: string;
+    uniqueCode?: string;
+    avatar?: string;
+    isAppUser?: boolean;
+  };
   lastMessage?: Message;
   unreadCount: number;
   isBlocked: boolean;
