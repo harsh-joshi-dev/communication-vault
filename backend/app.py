@@ -33,22 +33,42 @@ app.config.from_object(Config)
 Config.init_app(app)
 
 # Initialize MongoDB
-try:
-    # Use connect with retry and timeout settings for Render
-    connect(
-        host=Config.MONGODB_URI,
-        alias='default',
-        connectTimeoutMS=30000,
-        serverSelectionTimeoutMS=30000,
-        socketTimeoutMS=30000,
-        retryWrites=True,
-        w='majority'
-    )
-    print(f"Connected to MongoDB: {Config.MONGODB_DB_NAME}")
-except Exception as e:
-    print(f"MongoDB connection error: {e}")
-    # Don't fail on startup, but log the error
-    # Connection will be retried on first use
+def init_mongodb():
+    """Initialize MongoDB connection with retry logic"""
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            # Parse URI and extract connection parameters
+            uri = Config.MONGODB_URI
+            
+            # Try connecting with mongoengine
+            connect(
+                db=Config.MONGODB_DB_NAME,
+                host=uri,
+                alias='default',
+                connect=False,  # Lazy connection - connect on first use
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=5000,
+                socketTimeoutMS=5000,
+            )
+            print(f"MongoDB connection initialized for database: {Config.MONGODB_DB_NAME}")
+            return True
+        except Exception as e:
+            retry_count += 1
+            print(f"MongoDB connection attempt {retry_count}/{max_retries} failed: {e}")
+            if retry_count >= max_retries:
+                print(f"MongoDB connection error after {max_retries} attempts: {e}")
+                print("App will continue but MongoDB operations may fail. Check your MONGODB_URI.")
+                return False
+            import time
+            time.sleep(2)  # Wait before retry
+    
+    return False
+
+# Initialize MongoDB (non-blocking)
+init_mongodb()
 
 # Initialize extensions
 CORS(app, resources={r"/*": {"origins": "*"}})
