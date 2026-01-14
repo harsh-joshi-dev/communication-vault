@@ -243,10 +243,10 @@ def register_socket_handlers(socketio_instance):
             # For non-app users, we don't track unread count
             chat.save()
             
-            # Emit to chat room
+            # Emit to chat room (both sender and receiver will receive if they joined the chat room)
             socketio_instance.emit('new_message', message.to_dict(), room=f'chat_{chat.id}')
             
-            # Also notify receiver directly (only if app user/device)
+            # Also notify receiver directly via device room (ensures delivery even if not in chat room)
             if receiver_id:
                 socketio_instance.emit('new_message', message.to_dict(), room=f'device_{receiver_id}')
                 # Mark as delivered if receiver is online
@@ -260,6 +260,9 @@ def register_socket_handlers(socketio_instance):
                     'status': 'delivered',
                     'deliveredAt': message.delivered_at.isoformat()
                 }, room=f'device_{device_id}')
+            
+            # Also send message back to sender (so they see it in their chat)
+            socketio_instance.emit('new_message', message.to_dict(), room=f'device_{device_id}')
             
             # Return success response
             return {'message': message.to_dict()}
@@ -326,7 +329,7 @@ def register_socket_handlers(socketio_instance):
                     updated_messages.append(message.to_dict())
             
             # Update unread count
-            if chat.user1_id == user_id:
+            if chat.user1_id == device_id:
                 chat.unread_count_user1 = 0
             else:
                 chat.unread_count_user2 = 0
@@ -343,4 +346,47 @@ def register_socket_handlers(socketio_instance):
             
         except Exception as e:
             print(f"Mark read error: {e}")
+    
+    @socketio_instance.on('delete_message')
+    def handle_delete_message(data):
+        """Delete a message (mark as deleted)"""
+        try:
+            from flask import request
+            device_id = getattr(request, 'sid_device_id', None)
+            chat_id = data.get('chatId')
+            message_id = data.get('messageId')
+            
+            if not device_id or not chat_id or not message_id:
+                return
+            
+            # Verify device is part of chat
+            chat = Chat.objects(id=chat_id).first()
+            if not chat or (chat.user1_id != device_id and chat.user2_id != device_id):
+                return
+            
+            # Mark message as deleted
+            message = Message.objects(id=message_id).first()
+            if message and message.sender_id == device_id:  # Only sender can delete
+                message.is_deleted = True
+                message.save()
+                
+                # Emit delete event to both devices in chat
+                socketio_instance.emit('message_deleted', {
+                    'chatId': chat_id,
+                    'messageId': message_id,
+                }, room=f'chat_{chat_id}')
+                
+                # Also notify both devices directly
+                socketio_instance.emit('message_deleted', {
+                    'chatId': chat_id,
+                    'messageId': message_id,
+                }, room=f'device_{chat.user1_id}')
+                if chat.user2_id:
+                    socketio_instance.emit('message_deleted', {
+                        'chatId': chat_id,
+                        'messageId': message_id,
+                    }, room=f'device_{chat.user2_id}')
+                
+        except Exception as e:
+            print(f"Delete message error: {e}")
 

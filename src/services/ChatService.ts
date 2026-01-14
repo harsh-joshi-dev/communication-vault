@@ -4,6 +4,7 @@ import {Message, Chat} from '../types';
 import {uuidv4} from '../utils/uuid';
 import {mediaService} from './MediaService';
 import {deviceService} from './DeviceService';
+import {messageStorageService} from './MessageStorageService';
 import axios from 'axios';
 
 // Backend API URL - Update this to your server URL
@@ -52,12 +53,57 @@ class ChatService {
       console.log('Chat disconnected');
     });
 
-    this.socket.on('new_message', (message: Message) => {
+    this.socket.on('new_message', async (message: Message) => {
+      // Store message locally
+      await messageStorageService.saveMessage(message);
+      
+      // Notify listeners
       this.messageListeners.forEach(listener => listener(message));
     });
 
     this.socket.on('chat_updated', (chat: Chat) => {
       this.chatListeners.forEach(listener => listener(chat));
+    });
+
+    // Listen for message status updates
+    this.socket.on('message_status_update', async (update: {
+      messageId: string;
+      chatId: string;
+      status: Message['status'];
+      deliveredAt?: string;
+      readAt?: string;
+    }) => {
+      // Update local storage
+      await messageStorageService.updateMessageStatus(
+        update.chatId,
+        update.messageId,
+        update.status,
+        update.deliveredAt,
+        update.readAt,
+      );
+      
+      // Notify listeners
+      this.messageStatusListeners.forEach(listener => listener(update));
+    });
+
+    // Listen for message deletion
+    this.socket.on('message_deleted', async (data: {chatId: string; messageId: string}) => {
+      await messageStorageService.deleteMessage(data.chatId, data.messageId);
+      // Notify listeners
+      this.messageListeners.forEach(listener => {
+        const deletedMessage: Message = {
+          id: data.messageId,
+          chatId: data.chatId,
+          senderId: '',
+          receiverId: '',
+          type: 'text',
+          content: '',
+          isDeleted: true,
+          status: 'sent',
+          createdAt: new Date().toISOString(),
+        };
+        listener(deletedMessage);
+      });
     });
   }
 
@@ -80,6 +126,31 @@ class ChatService {
     return () => {
       this.chatListeners = this.chatListeners.filter(l => l !== listener);
     };
+  }
+
+  onMessageStatusUpdate(listener: (update: {
+    messageId: string;
+    chatId: string;
+    status: Message['status'];
+    deliveredAt?: string;
+    readAt?: string;
+  }) => void) {
+    this.messageStatusListeners.push(listener);
+    return () => {
+      this.messageStatusListeners = this.messageStatusListeners.filter(l => l !== listener);
+    };
+  }
+
+  async deleteMessage(chatId: string, messageId: string): Promise<void> {
+    if (!this.socket?.connected) {
+      throw new Error('Not connected to chat server');
+    }
+
+    // Mark as deleted locally immediately
+    await messageStorageService.deleteMessage(chatId, messageId);
+
+    // Emit delete event to server
+    this.socket.emit('delete_message', {chatId, messageId});
   }
 
   async sendMessage(
@@ -169,7 +240,12 @@ class ChatService {
         return;
       }
 
-      this.socket.emit('send_message', messageData, (response: any) => {
+      // Store message locally immediately (optimistic update)
+      messageStorageService.saveMessage(message).catch(err => 
+        console.error('Error storing message locally:', err)
+      );
+
+      this.socket.emit('send_message', messageData, async (response: any) => {
         if (response.error) {
           // Check for specific error types
           if (response.error.includes('not registered') || response.error.includes('not invited')) {
@@ -178,7 +254,10 @@ class ChatService {
             reject(new Error(response.error));
           }
         } else {
-          resolve(response.message);
+          // Update local storage with server response (includes server ID, timestamps, etc.)
+          const serverMessage = response.message;
+          await messageStorageService.saveMessage(serverMessage);
+          resolve(serverMessage);
         }
       });
     });
@@ -233,23 +312,14 @@ class ChatService {
 
   async getMessages(chatId: string): Promise<Message[]> {
     try {
-      const EncryptedStorage = require('react-native-encrypted-storage').default;
-      const token = await EncryptedStorage.getItem('access_token');
+      // Get messages from local storage (primary source)
+      // Socket.io will sync messages in real-time
+      const localMessages = await messageStorageService.getMessages(chatId);
       
-      const apiUrl = __DEV__ && Platform.OS === 'android'
-        ? 'http://192.168.1.16:5001/api'
-        : (__DEV__ ? 'http://localhost:5001/api' : 'https://communication-vault.onrender.com/api');
-
-      const response = await axios.get(
-        `${apiUrl}/messages/chats/${chatId}/messages`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
+      // Return sorted messages
+      return localMessages.sort((a, b) => 
+        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
       );
-
-      return response.data.messages || [];
     } catch (error: any) {
       console.error('Error fetching messages:', error);
       return [];

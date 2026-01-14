@@ -53,6 +53,9 @@ const ChatDetailScreen: React.FC = () => {
   const audioRecorderPlayer = useRef(new AudioRecorderPlayer()).current;
 
   useEffect(() => {
+    // Get current device ID
+    deviceService.getDeviceId().then(id => setCurrentDeviceId(id));
+    
     // Connect chat service with device ID
     chatService.connect();
     
@@ -176,7 +179,12 @@ const ChatDetailScreen: React.FC = () => {
   const loadMessages = async () => {
     try {
       const msgs = await chatService.getMessages(chatId);
-      setMessages(msgs);
+      // Filter out deleted messages and sort
+      const visibleMessages = msgs
+        .filter(msg => !msg.isDeleted)
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      setMessages(visibleMessages);
+      scrollToBottom();
     } catch (error) {
       console.error('Error loading messages:', error);
     }
@@ -185,7 +193,25 @@ const ChatDetailScreen: React.FC = () => {
   const setupMessageListener = () => {
     chatService.onMessage(async (message: Message) => {
       if (message.chatId === chatId) {
-        setMessages(prev => [...prev, message]);
+        if (message.isDeleted) {
+          // Remove deleted message from UI
+          setMessages(prev => prev.filter(msg => msg.id !== message.id));
+          return;
+        }
+        
+        setMessages(prev => {
+          // Check if message already exists (avoid duplicates)
+          const exists = prev.find(msg => msg.id === message.id);
+          if (exists) {
+            // Update existing message
+            return prev.map(msg => msg.id === message.id ? message : msg);
+          }
+          // Add new message and sort
+          const updated = [...prev, message].sort((a, b) => 
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+          );
+          return updated;
+        });
         scrollToBottom();
         
         // Update chat storage with new message (for ChatsScreen)
@@ -217,7 +243,7 @@ const ChatDetailScreen: React.FC = () => {
     const tempMessage: Message = {
       id: tempMessageId,
       chatId,
-      senderId: user?.id || '',
+      senderId: currentDeviceId || '',
       receiverId: receiverId || '',
       type: 'text',
       content: messageText,
@@ -246,13 +272,24 @@ const ChatDetailScreen: React.FC = () => {
         },
       );
       
-      // Replace temp message with real message
-      setMessages(prev => prev.map(msg => 
-        msg.id === tempMessageId ? {...sentMessage, status: sentMessage.status || 'sent'} : msg
-      ));
+      // Replace temp message with real message (or add if not found)
+      setMessages(prev => {
+        const exists = prev.find(msg => msg.id === tempMessageId);
+        if (exists) {
+          return prev.map(msg => 
+            msg.id === tempMessageId ? {...sentMessage, status: sentMessage.status || 'sent'} : msg
+          );
+        }
+        // If temp message not found, add the sent message
+        return [...prev, {...sentMessage, status: sentMessage.status || 'sent'}].sort((a, b) => 
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+      });
       
       // Update chat storage with new message (for ChatsScreen)
       await chatStorageService.updateChatWithMessage(chatId, sentMessage);
+      
+      scrollToBottom();
       
       // Mark messages as read if receiver is viewing
       if (receiverId) {
@@ -553,16 +590,51 @@ const ChatDetailScreen: React.FC = () => {
     }
   };
 
+  const handleDeleteMessage = async (messageId: string) => {
+    Alert.alert(
+      'Delete Message',
+      'Are you sure you want to delete this message?',
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await chatService.deleteMessage(chatId, messageId);
+              setMessages(prev => prev.filter(msg => msg.id !== messageId));
+              // Also update chat storage
+              const updatedMessages = await messageStorageService.getMessages(chatId);
+              const lastMessage = updatedMessages[updatedMessages.length - 1];
+              if (lastMessage) {
+                await chatStorageService.updateChatWithMessage(chatId, lastMessage);
+              }
+            } catch (error) {
+              console.error('Error deleting message:', error);
+              Alert.alert('Error', 'Failed to delete message');
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const renderMessage = ({item}: {item: Message}) => {
-    const isMe = item.senderId === user?.id;
+    if (item.isDeleted) {
+      return null; // Don't render deleted messages
+    }
+    
+    const isMe = item.senderId === currentDeviceId;
     const isViewOnce = item.isViewOnce && item.readAt;
 
     return (
-      <View
+      <TouchableOpacity
         style={[
           styles.messageContainer,
           isMe ? styles.myMessage : styles.theirMessage,
-        ]}>
+        ]}
+        onLongPress={() => handleDeleteMessage(item.id)}
+        activeOpacity={0.7}>
         {!isMe && otherUserAvatar && (
           <Image source={{uri: otherUserAvatar}} style={styles.messageAvatar} />
         )}
@@ -691,7 +763,7 @@ const ChatDetailScreen: React.FC = () => {
             )}
           </View>
         </View>
-      </View>
+      </TouchableOpacity>
     );
   };
 
