@@ -8,7 +8,7 @@ const getApiBaseUrl = () => {
     }
     return 'http://localhost:5001/api';
   }
-  return 'https://your-api-domain.com/api';
+  return 'https://communication-vault.onrender.com/api';
 };
 
 const API_BASE_URL = getApiBaseUrl();

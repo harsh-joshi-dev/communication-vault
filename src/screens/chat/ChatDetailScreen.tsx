@@ -466,7 +466,7 @@ const ChatDetailScreen: React.FC = () => {
         if (__DEV__) {
           return Platform.OS === 'android' ? 'http://192.168.1.16:5001' : 'http://localhost:5001';
         }
-        return 'https://your-api-domain.com';
+        return 'https://communication-vault.onrender.com';
       };
       
       const audioUrl = message.mediaUrl?.startsWith('http') 

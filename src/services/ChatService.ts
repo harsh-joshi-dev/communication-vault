@@ -10,7 +10,7 @@ import axios from 'axios';
 // For Android emulator, use 10.0.2.2
 const API_BASE_URL = __DEV__
   ? (Platform.OS === 'android' ? 'http://192.168.1.16:5001' : 'http://localhost:5001')
-  : 'https://your-api-domain.com';
+  : 'https://communication-vault.onrender.com';
 
 class ChatService {
   private socket: Socket | null = null;
@@ -29,7 +29,7 @@ class ChatService {
     // Update API URL for Android (physical device or emulator)
     const apiUrl = __DEV__ && Platform.OS === 'android'
       ? 'http://192.168.1.16:5001'
-      : API_BASE_URL;
+      : (__DEV__ ? 'http://localhost:5001' : 'https://communication-vault.onrender.com');
 
     this.socket = io(apiUrl, {
       auth: {
@@ -230,7 +230,7 @@ class ChatService {
       
       const apiUrl = __DEV__ && Platform.OS === 'android'
         ? 'http://192.168.1.16:5001/api'
-        : API_BASE_URL;
+        : (__DEV__ ? 'http://localhost:5001/api' : 'https://communication-vault.onrender.com/api');
 
       const response = await axios.get(
         `${apiUrl}/messages/chats/${chatId}/messages`,
@@ -260,7 +260,7 @@ class ChatService {
       
       const apiUrl = __DEV__ && Platform.OS === 'android'
         ? 'http://192.168.1.16:5001/api'
-        : API_BASE_URL;
+        : (__DEV__ ? 'http://localhost:5001/api' : 'https://communication-vault.onrender.com/api');
 
       await axios.get(
         `${apiUrl}/messages/chats/${chatId}/messages`,
