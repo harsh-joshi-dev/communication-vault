@@ -54,6 +54,7 @@ const ChatsScreen: React.FC = () => {
             chatId: item.id,
             contactName: contactName,
             receiverId: item.otherUser?.id || item.participantIds?.[0],
+            receiverUniqueCode: item.otherUser?.uniqueCode,
             isAppUser: item.otherUser?.isAppUser || false,
           } as never);
         }}>

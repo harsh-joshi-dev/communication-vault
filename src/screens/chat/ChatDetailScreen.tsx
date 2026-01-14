@@ -253,7 +253,7 @@ const ChatDetailScreen: React.FC = () => {
       id: tempMessageId,
       chatId,
       senderId: currentDeviceId || '',
-      receiverId: receiverId || '',
+      receiverId: receiverUniqueCode || receiverId || '',
       type: 'text',
       content: messageText,
       status: 'sending',

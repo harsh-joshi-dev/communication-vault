@@ -83,6 +83,7 @@ const QRScannerScreen: React.FC = () => {
         chatId: chat.id,
         contactName: data.deviceName || `Device ${data.uniqueCode}`,
         receiverId: data.deviceId,
+        receiverUniqueCode: data.uniqueCode,
         isAppUser: true,
       });
     } catch (error: any) {
