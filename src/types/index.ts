@@ -79,6 +79,8 @@ export interface Chat {
 export interface Contact {
   id: string;
   userId?: string; // If user has app
+  uniqueCode?: string; // Device-based unique code
+  deviceId?: string; // Device ID
   name: string;
   phoneNumber?: string;
   email?: string;

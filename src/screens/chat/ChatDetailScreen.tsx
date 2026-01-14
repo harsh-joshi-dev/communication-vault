@@ -16,18 +16,16 @@ import {useRoute, useNavigation} from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/Ionicons';
 import {Message} from '../../types';
 import {format} from 'date-fns';
-import {useAuth} from '../../contexts/AuthContext';
 import {chatService} from '../../services/ChatService';
+import {deviceService} from '../../services/DeviceService';
 import {launchImageLibrary} from 'react-native-image-picker';
 import DocumentPicker from 'react-native-document-picker';
 import AudioRecorderPlayer from 'react-native-audio-recorder-player';
 import {mediaService} from '../../services/MediaService';
-import {Platform} from 'react-native';
 
 const ChatDetailScreen: React.FC = () => {
   const route = useRoute();
   const navigation = useNavigation();
-  const {user} = useAuth();
   const {chatId, contactName, receiverId, phoneNumber, email, isAppUser} = route.params as {
     chatId: string;
     contactName: string;
@@ -54,6 +52,9 @@ const ChatDetailScreen: React.FC = () => {
   const audioRecorderPlayer = useRef(new AudioRecorderPlayer()).current;
 
   useEffect(() => {
+    // Connect chat service with device ID
+    chatService.connect();
+    
     // Load messages and setup listener
     // Chat will be created automatically when first message is sent
     loadMessages();
@@ -91,10 +92,11 @@ const ChatDetailScreen: React.FC = () => {
     const socket = (chatService as any).socketInstance;
     if (!socket) return;
     
-    socket.on('user_typing', (data: {userId: string; userName: string; chatId: string; isTyping: boolean}) => {
-      if (data.chatId === chatId && data.userId !== user?.id) {
+    socket.on('user_typing', async (data: {deviceId: string; deviceName: string; chatId: string; isTyping: boolean}) => {
+      const currentDevice = await deviceService.getDeviceId();
+      if (data.chatId === chatId && data.deviceId !== currentDevice) {
         setIsTyping(data.isTyping);
-        setTypingUser(data.isTyping ? data.userName : null);
+        setTypingUser(data.isTyping ? data.deviceName : null);
         
         // Auto-hide typing after 3 seconds
         if (typingTimeoutRef.current) {

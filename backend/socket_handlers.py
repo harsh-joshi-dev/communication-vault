@@ -14,30 +14,39 @@ def register_socket_handlers(socketio_instance):
     
     @socketio_instance.on('connect')
     def handle_connect(auth):
-        """Handle client connection"""
+        """Handle client connection with device-based authentication"""
         try:
-            if not auth or 'token' not in auth:
+            if not auth:
                 return False
             
-            # Verify token
-            decoded = decode_token(auth['token'])
-            user_id = decoded['sub']
+            # Get device info from auth (deviceId, uniqueCode, deviceName)
+            device_id = auth.get('deviceId')
+            unique_code = auth.get('uniqueCode')
+            device_name = auth.get('deviceName', 'Unknown Device')
             
-            # Store user_id in session
+            if not device_id:
+                print("Connection rejected: Missing deviceId")
+                return False
+            
+            # Store device_id in session
             from flask import request
-            request.sid_user_id = user_id
+            request.sid_device_id = device_id
+            request.sid_unique_code = unique_code
+            request.sid_device_name = device_name
             
-            # Join user's personal room
-            join_room(f'user_{user_id}')
+            # Join device's personal room
+            join_room(f'device_{device_id}')
             
-            # Update user online status
-            user = User.objects(id=user_id).first()
-            if user:
-                user.last_seen = datetime.utcnow()
-                user.save()
+            # Also join room by unique code for easier lookup
+            if unique_code:
+                join_room(f'code_{unique_code}')
             
-            emit('connected', {'userId': user_id})
-            print(f"User {user_id} connected")
+            emit('connected', {
+                'deviceId': device_id,
+                'uniqueCode': unique_code,
+                'deviceName': device_name
+            })
+            print(f"Device {device_id} ({device_name}) connected with code {unique_code}")
             return True
             
         except Exception as e:
@@ -49,11 +58,14 @@ def register_socket_handlers(socketio_instance):
         """Handle client disconnection"""
         try:
             from flask import request
-            user_id = getattr(request, 'sid_user_id', None)
+            device_id = getattr(request, 'sid_device_id', None)
+            unique_code = getattr(request, 'sid_unique_code', None)
             
-            if user_id:
-                leave_room(f'user_{user_id}')
-                print(f"User {user_id} disconnected")
+            if device_id:
+                leave_room(f'device_{device_id}')
+                if unique_code:
+                    leave_room(f'code_{unique_code}')
+                print(f"Device {device_id} disconnected")
         except Exception as e:
             print(f"Disconnect error: {e}")
     
@@ -62,18 +74,18 @@ def register_socket_handlers(socketio_instance):
         """Join a chat room"""
         try:
             from flask import request
-            user_id = getattr(request, 'sid_user_id', None)
+            device_id = getattr(request, 'sid_device_id', None)
             chat_id = data.get('chatId')
             
-            if not user_id or not chat_id:
+            if not device_id or not chat_id:
                 return
             
-            # Verify user is part of chat
+            # Verify device is part of chat
             chat = Chat.objects(id=chat_id).first()
-            if chat and (chat.user1_id == user_id or chat.user2_id == user_id):
+            if chat and (chat.user1_id == device_id or chat.user2_id == device_id):
                 join_room(f'chat_{chat_id}')
                 emit('joined_chat', {'chatId': chat_id})
-                print(f"User {user_id} joined chat {chat_id}")
+                print(f"Device {device_id} joined chat {chat_id}")
         except Exception as e:
             print(f"Join chat error: {e}")
     
@@ -82,15 +94,15 @@ def register_socket_handlers(socketio_instance):
         """Leave a chat room"""
         try:
             from flask import request
-            user_id = getattr(request, 'sid_user_id', None)
+            device_id = getattr(request, 'sid_device_id', None)
             chat_id = data.get('chatId')
             
-            if not user_id or not chat_id:
+            if not device_id or not chat_id:
                 return
             
             leave_room(f'chat_{chat_id}')
             emit('left_chat', {'chatId': chat_id})
-            print(f"User {user_id} left chat {chat_id}")
+            print(f"Device {device_id} left chat {chat_id}")
         except Exception as e:
             print(f"Leave chat error: {e}")
     
@@ -99,9 +111,10 @@ def register_socket_handlers(socketio_instance):
         """Handle real-time message sending"""
         try:
             from flask import request
-            user_id = getattr(request, 'sid_user_id', None)
+            device_id = getattr(request, 'sid_device_id', None)
+            device_name = getattr(request, 'sid_device_name', 'Unknown Device')
             
-            if not user_id:
+            if not device_id:
                 emit('error', {'message': 'Not authenticated'})
                 return
             
@@ -123,23 +136,42 @@ def register_socket_handlers(socketio_instance):
                     pass
             
             if not chat:
-                # Try to find existing chat by phone number
-                if phone_number:
+                # Try to find existing chat by phone number or device ID
+                receiver_device_id = data.get('receiverId')  # This is now deviceId
+                if receiver_device_id:
+                    # Try to find chat between these two devices
                     chat = Chat.objects(
-                        user1_id=user_id,
+                        (Chat.user1_id == device_id) & (Chat.user2_id == receiver_device_id)
+                        | (Chat.user1_id == receiver_device_id) & (Chat.user2_id == device_id)
+                    ).first()
+                elif phone_number:
+                    chat = Chat.objects(
+                        user1_id=device_id,
                         contact_phone_number=phone_number,
                         is_non_app_user=True
                     ).first()
             
             if not chat:
                 # Create new chat
-                if phone_number or contact_name:
+                receiver_device_id = data.get('receiverId')
+                if receiver_device_id:
+                    # App user chat (device to device)
+                    import uuid
+                    new_chat_id = str(uuid.uuid4())
+                    chat = Chat(
+                        id=new_chat_id,
+                        user1_id=device_id,
+                        user2_id=receiver_device_id,
+                        is_non_app_user=False,
+                    )
+                    chat.save()
+                elif phone_number or contact_name:
                     # Non-app user chat
                     import uuid
                     new_chat_id = str(uuid.uuid4())
                     chat = Chat(
                         id=new_chat_id,
-                        user1_id=user_id,
+                        user1_id=device_id,
                         user2_id=None,
                         contact_phone_number=phone_number,
                         contact_name=contact_name,
@@ -151,8 +183,8 @@ def register_socket_handlers(socketio_instance):
                     emit('error', {'message': 'Chat not found and cannot create without contact info'})
                     return
             
-            # Verify user is part of chat
-            if chat.user1_id != user_id:
+            # Verify device is part of chat
+            if chat.user1_id != device_id and chat.user2_id != device_id:
                 emit('error', {'message': 'Chat not found'})
                 return
             
@@ -163,16 +195,10 @@ def register_socket_handlers(socketio_instance):
                 receiver_phone_number = chat.contact_phone_number
                 receiver_name = chat.contact_name
             else:
-                # App user chat
-                receiver_id = chat.user2_id if chat.user1_id == user_id else chat.user1_id
+                # App user chat (device to device)
+                receiver_id = chat.user2_id if chat.user1_id == device_id else chat.user1_id
                 receiver_phone_number = None
                 receiver_name = None
-                
-                # Validate receiver exists (only for app users)
-                receiver = User.objects(id=receiver_id).first()
-                if not receiver:
-                    emit('error', {'message': 'Receiver not found or not registered. Please invite them first.'}, callback=True)
-                    return {'error': 'Receiver not found or not registered'}
             
             # Get additional message data
             file_name = data.get('fileName')
@@ -185,7 +211,7 @@ def register_socket_handlers(socketio_instance):
             # Create message with status
             message = Message(
                 chat_id=str(chat.id),
-                sender_id=user_id,
+                sender_id=device_id,
                 receiver_id=receiver_id,
                 receiver_phone_number=receiver_phone_number,
                 receiver_name=receiver_name,
@@ -220,19 +246,20 @@ def register_socket_handlers(socketio_instance):
             # Emit to chat room
             socketio_instance.emit('new_message', message.to_dict(), room=f'chat_{chat.id}')
             
-            # Also notify receiver directly (only if app user)
+            # Also notify receiver directly (only if app user/device)
             if receiver_id:
-                socketio_instance.emit('new_message', message.to_dict(), room=f'user_{receiver_id}')
+                socketio_instance.emit('new_message', message.to_dict(), room=f'device_{receiver_id}')
                 # Mark as delivered if receiver is online
                 message.status = 'delivered'
                 message.delivered_at = datetime.utcnow()
                 message.save()
-                # Emit status update
+                # Emit status update to sender
                 socketio_instance.emit('message_status_update', {
                     'messageId': str(message.id),
+                    'chatId': str(chat.id),
                     'status': 'delivered',
                     'deliveredAt': message.delivered_at.isoformat()
-                }, room=f'chat_{chat.id}')
+                }, room=f'device_{device_id}')
             
             # Return success response
             return {'message': message.to_dict()}
@@ -247,27 +274,23 @@ def register_socket_handlers(socketio_instance):
         """Handle typing indicator"""
         try:
             from flask import request
-            user_id = getattr(request, 'sid_user_id', None)
+            device_id = getattr(request, 'sid_device_id', None)
+            device_name = getattr(request, 'sid_device_name', 'Unknown Device')
             chat_id = data.get('chatId')
             is_typing = data.get('isTyping', False)
             
-            if not user_id or not chat_id:
+            if not device_id or not chat_id:
                 return
             
-            # Verify user is part of chat
+            # Verify device is part of chat
             chat = Chat.objects(id=chat_id).first()
-            if not chat or (chat.user1_id != user_id and chat.user2_id != user_id):
+            if not chat or (chat.user1_id != device_id and chat.user2_id != device_id):
                 return
             
-            # Get user info
-            user = User.objects(id=user_id).first()
-            if not user:
-                return
-            
-            # Emit to other users in chat
+            # Emit to other devices in chat
             socketio_instance.emit('user_typing', {
-                'userId': user_id,
-                'userName': user.name,
+                'deviceId': device_id,
+                'deviceName': device_name,
                 'chatId': chat_id,
                 'isTyping': is_typing
             }, room=f'chat_{chat_id}', include_self=False)
@@ -280,23 +303,23 @@ def register_socket_handlers(socketio_instance):
         """Mark messages as read"""
         try:
             from flask import request
-            user_id = getattr(request, 'sid_user_id', None)
+            device_id = getattr(request, 'sid_device_id', None)
             chat_id = data.get('chatId')
             message_ids = data.get('messageIds', [])
             
-            if not user_id or not chat_id:
+            if not device_id or not chat_id:
                 return
             
-            # Verify user is part of chat
+            # Verify device is part of chat
             chat = Chat.objects(id=chat_id).first()
-            if not chat or (chat.user1_id != user_id and chat.user2_id != user_id):
+            if not chat or (chat.user1_id != device_id and chat.user2_id != device_id):
                 return
             
             # Mark messages as read
             updated_messages = []
             for msg_id in message_ids:
                 message = Message.objects(id=msg_id).first()
-                if message and message.receiver_id == user_id and not message.read_at:
+                if message and message.receiver_id == device_id and not message.read_at:
                     message.status = 'read'
                     message.read_at = datetime.utcnow()
                     message.save()
@@ -316,7 +339,7 @@ def register_socket_handlers(socketio_instance):
                     'chatId': chat_id,
                     'messageIds': message_ids,
                     'readAt': datetime.utcnow().isoformat()
-                }, room=f'user_{sender_id}')
+                }, room=f'device_{sender_id}')
             
         except Exception as e:
             print(f"Mark read error: {e}")

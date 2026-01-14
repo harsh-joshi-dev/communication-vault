@@ -12,25 +12,12 @@ import QRCodeScanner from 'react-native-qrcode-scanner';
 import Icon from 'react-native-vector-icons/Ionicons';
 import {Contact} from '../../types';
 import {uuidv4} from '../../utils/uuid';
-import axios from 'axios';
 import {Platform} from 'react-native';
-import {useAuth} from '../../contexts/AuthContext';
-
-const getApiBaseUrl = () => {
-  if (__DEV__) {
-    if (Platform.OS === 'android') {
-      return 'http://192.168.1.16:5001/api';
-    }
-    return 'http://localhost:5001/api';
-  }
-  return 'https://communication-vault.onrender.com/api';
-};
-
-const API_BASE_URL = getApiBaseUrl();
+import {deviceService} from '../../services/DeviceService';
+import EncryptedStorage from 'react-native-encrypted-storage';
 
 const QRScannerScreen: React.FC = () => {
   const navigation = useNavigation();
-  const {user} = useAuth();
   const [scanning, setScanning] = useState(true);
   const [processing, setProcessing] = useState(false);
 
@@ -41,48 +28,90 @@ const QRScannerScreen: React.FC = () => {
     setProcessing(true);
 
     try {
-      const data = JSON.parse(e.data);
+      console.log('QR Code scanned data:', e.data);
+      
+      // Try to parse JSON
+      let data;
+      try {
+        data = JSON.parse(e.data);
+      } catch (parseError) {
+        console.error('Failed to parse QR code as JSON:', parseError);
+        throw new Error('Invalid QR code format: Not a valid JSON');
+      }
+      
+      console.log('Parsed QR data:', data);
       
       // Validate QR data structure - must have uniqueCode
       if (!data.uniqueCode) {
-        throw new Error('Invalid QR code format');
+        console.error('QR data missing uniqueCode:', data);
+        throw new Error('Invalid QR code format: Missing uniqueCode');
       }
 
-      // Get access token
-      const EncryptedStorage = require('react-native-encrypted-storage').default;
-      const token = await EncryptedStorage.getItem('access_token');
+      // Get current device info
+      const currentDeviceInfo = await deviceService.getDeviceInfo();
+      
+      // Don't allow adding yourself
+      if (data.uniqueCode === currentDeviceInfo.uniqueCode) {
+        Alert.alert(
+          'Cannot Add Yourself',
+          'This is your own QR code. Please scan someone else\'s QR code.',
+          [
+            {
+              text: 'OK',
+              onPress: () => {
+                setScanning(true);
+                setProcessing(false);
+              },
+            },
+          ],
+        );
+        return;
+      }
 
-      // Fetch user by unique code
-      const response = await axios.get(
-        `${API_BASE_URL}/contacts/by-code/${data.uniqueCode}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
+      // Store contact locally (no backend needed)
+      const contactsKey = 'device_contacts';
+      const existingContactsJson = await EncryptedStorage.getItem(contactsKey);
+      const existingContacts: Contact[] = existingContactsJson 
+        ? JSON.parse(existingContactsJson) 
+        : [];
+
+      // Check if contact already exists
+      const existingContact = existingContacts.find(
+        c => c.uniqueCode === data.uniqueCode
       );
 
-      const contactUser = response.data.user;
+      if (existingContact) {
+        Alert.alert(
+          'Contact Already Added',
+          `${data.deviceName || 'This device'} is already in your contacts`,
+          [
+            {
+              text: 'OK',
+              onPress: () => navigation.goBack(),
+            },
+          ],
+        );
+        return;
+      }
 
-      // Add contact via API
-      await axios.post(
-        `${API_BASE_URL}/contacts`,
-        {
-          uniqueCode: contactUser.uniqueCode,
-          userId: contactUser.id,
-          qrCode: e.data,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-        },
-      );
+      // Create new contact
+      const newContact: Contact = {
+        id: uuidv4(),
+        uniqueCode: data.uniqueCode,
+        deviceId: data.deviceId,
+        name: data.deviceName || `Device ${data.uniqueCode}`,
+        isAppUser: true,
+        isInvited: false,
+        createdAt: new Date().toISOString(),
+      };
+
+      // Add to contacts
+      existingContacts.push(newContact);
+      await EncryptedStorage.setItem(contactsKey, JSON.stringify(existingContacts));
 
       Alert.alert(
         'Contact Added',
-        `${contactUser.name} has been added to your contacts`,
+        `${data.deviceName || 'Device'} has been added to your contacts`,
         [
           {
             text: 'OK',
@@ -94,7 +123,7 @@ const QRScannerScreen: React.FC = () => {
       console.error('QR scan error:', error);
       Alert.alert(
         'Error',
-        error?.response?.data?.error || error?.message || 'Failed to add contact',
+        error?.message || 'Failed to add contact',
         [
           {
             text: 'Try Again',

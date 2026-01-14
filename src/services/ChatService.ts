@@ -3,6 +3,7 @@ import {Platform} from 'react-native';
 import {Message, Chat} from '../types';
 import {uuidv4} from '../utils/uuid';
 import {mediaService} from './MediaService';
+import {deviceService} from './DeviceService';
 import axios from 'axios';
 
 // Backend API URL - Update this to your server URL
@@ -21,10 +22,13 @@ class ChatService {
     return this.socket;
   }
 
-  connect(userId: string, token: string) {
+  async connect() {
     if (this.socket?.connected) {
       return;
     }
+
+    // Get device info for authentication
+    const deviceInfo = await deviceService.getDeviceInfo();
 
     // Update API URL for Android (physical device or emulator)
     const apiUrl = __DEV__ && Platform.OS === 'android'
@@ -33,8 +37,9 @@ class ChatService {
 
     this.socket = io(apiUrl, {
       auth: {
-        userId,
-        token,
+        deviceId: deviceInfo.deviceId,
+        uniqueCode: deviceInfo.uniqueCode,
+        deviceName: deviceInfo.deviceName,
       },
       transports: ['websocket'],
     });
@@ -128,11 +133,14 @@ class ChatService {
       }
     }
 
+    // Get device info for sender
+    const deviceInfo = await deviceService.getDeviceInfo();
+
     // Allow sending to non-app users (receiverId can be undefined)
     const message: Message = {
       id: uuidv4(),
       chatId,
-      senderId: '', // Will be set by backend
+      senderId: deviceInfo.deviceId, // Use device ID as sender
       receiverId: receiverId || '',
       type,
       content,

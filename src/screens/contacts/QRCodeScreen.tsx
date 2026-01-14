@@ -1,4 +1,4 @@
-import React from 'react';
+import React, {useState, useEffect} from 'react';
 import {
   View,
   Text,
@@ -6,29 +6,98 @@ import {
   TouchableOpacity,
   Share,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import {useNavigation} from '@react-navigation/native';
 import QRCode from 'react-native-qrcode-svg';
 import Icon from 'react-native-vector-icons/Ionicons';
-import {useAuth} from '../../contexts/AuthContext';
+import {deviceService} from '../../services/DeviceService';
 import LinearGradient from 'react-native-linear-gradient';
 
 const QRCodeScreen: React.FC = () => {
   const navigation = useNavigation();
-  const {user} = useAuth();
+  const [deviceInfo, setDeviceInfo] = useState<{
+    uniqueCode: string;
+    deviceId: string;
+    deviceName: string;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadDeviceInfo();
+  }, []);
+
+  const loadDeviceInfo = async () => {
+    try {
+      const info = await deviceService.getDeviceInfo();
+      setDeviceInfo(info);
+    } catch (error) {
+      console.error('Error loading device info:', error);
+      Alert.alert('Error', 'Failed to load device information');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <LinearGradient
+        colors={['#f5f5f5', '#e0e0e0']}
+        style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => navigation.goBack()}>
+            <Icon name="arrow-back" size={24} color="#333" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>My QR Code</Text>
+          <View style={styles.placeholder} />
+        </View>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#2196F3" />
+          <Text style={styles.loadingText}>Generating QR code...</Text>
+        </View>
+      </LinearGradient>
+    );
+  }
+
+  if (!deviceInfo) {
+    return (
+      <LinearGradient
+        colors={['#f5f5f5', '#e0e0e0']}
+        style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => navigation.goBack()}>
+            <Icon name="arrow-back" size={24} color="#333" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>My QR Code</Text>
+          <View style={styles.placeholder} />
+        </View>
+        <View style={styles.errorContainer}>
+          <Icon name="alert-circle" size={60} color="#f44336" />
+          <Text style={styles.errorText}>
+            Unable to generate QR code
+          </Text>
+          <Text style={styles.errorSubtext}>
+            Failed to load device information. Please try again.
+          </Text>
+        </View>
+      </LinearGradient>
+    );
+  }
 
   const qrData = JSON.stringify({
-    uniqueCode: user?.uniqueCode,
-    userId: user?.id,
-    name: user?.name,
-    username: user?.username,
-    avatar: user?.avatar,
+    uniqueCode: deviceInfo.uniqueCode,
+    deviceId: deviceInfo.deviceId,
+    deviceName: deviceInfo.deviceName,
   });
 
   const handleShare = async () => {
     try {
       await Share.share({
-        message: `Add me on Stealth Vault! Scan my QR code or use my username: ${user?.username}`,
+        message: `Add me on Stealth Vault! Scan my QR code.\nDevice: ${deviceInfo.deviceName}\nCode: ${deviceInfo.uniqueCode}`,
         title: 'Share Contact',
       });
     } catch (error) {
@@ -59,11 +128,6 @@ const QRCodeScreen: React.FC = () => {
             size={250}
             color="#000"
             backgroundColor="#fff"
-            logo={user?.avatar ? {uri: user.avatar} : undefined}
-            logoSize={50}
-            logoBackgroundColor="#fff"
-            logoMargin={5}
-            logoBorderRadius={25}
           />
         </View>
 
@@ -71,8 +135,8 @@ const QRCodeScreen: React.FC = () => {
           <View style={styles.avatarContainer}>
             <Icon name="person-circle" size={60} color="#2196F3" />
           </View>
-          <Text style={styles.name}>{user?.name}</Text>
-          <Text style={styles.username}>@{user?.username}</Text>
+          <Text style={styles.name}>{deviceInfo.deviceName}</Text>
+          <Text style={styles.username}>Code: {deviceInfo.uniqueCode}</Text>
         </View>
 
         <View style={styles.instructionsContainer}>
@@ -174,6 +238,39 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginLeft: 10,
+  },
+  placeholder: {
+    width: 40,
+  },
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 40,
+  },
+  errorText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#f44336',
+    marginTop: 20,
+    textAlign: 'center',
+  },
+  errorSubtext: {
+    fontSize: 14,
+    color: '#666',
+    marginTop: 10,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    marginTop: 20,
+    fontSize: 16,
+    color: '#666',
   },
 });
 
