@@ -279,15 +279,17 @@ class ChatService {
   }
 
   async deleteMessage(chatId: string, messageId: string): Promise<void> {
-    if (!this.socket?.connected) {
-      throw new Error('Not connected to chat server');
-    }
-
-    // Mark as deleted locally immediately
+    // Mark as deleted locally immediately (optimistic)
     await messageStorageService.deleteMessage(chatId, messageId);
 
-    // Emit delete event to server
-    this.socket.emit('delete_message', {chatId, messageId});
+    // Emit delete event to server if connected
+    if (this.socket?.connected) {
+      this.socket.emit('delete_message', {chatId, messageId});
+    } else {
+      console.warn('⚠️ Socket not connected, deletion saved locally and will sync when connected');
+      // Try to connect in background
+      this.connect().catch(err => console.warn('Background connection failed:', err));
+    }
   }
 
   async sendMessage(
@@ -497,14 +499,34 @@ class ChatService {
     contactName?: string;
     contactEmail?: string;
   }): Promise<Chat> {
-    if (!this.socket?.connected) {
-      throw new Error('Not connected to chat server');
-    }
-
-    return new Promise((resolve, reject) => {
-      if (!this.socket) {
-        reject(new Error('Socket not initialized'));
-        return;
+    // Create chat locally (optimistic)
+    const chatId = params.userId ? `chat_${params.userId}` : `chat_${params.phoneNumber}`;
+    
+    return new Promise((resolve) => {
+      // Return chat immediately (optimistic)
+      const chat: Chat = {
+        id: chatId,
+        participantIds: params.userId ? [params.userId] : [],
+        otherUser: params.userId ? undefined : {
+          id: undefined,
+          name: params.contactName || 'Unknown User',
+          isAppUser: false,
+        },
+        lastMessage: undefined,
+        unreadCount: 0,
+        isBlocked: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      
+      resolve(chat);
+      
+      // Try to sync with server if connected
+      if (this.socket?.connected) {
+        // Server sync can happen in background
+      } else {
+        console.warn('⚠️ Socket not connected, chat created locally');
+        this.connect().catch(err => console.warn('Background connection failed:', err));
       }
 
       // Use HTTP API for creating chat (more reliable)
