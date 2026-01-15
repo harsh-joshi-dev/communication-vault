@@ -7,24 +7,15 @@ import {deviceService} from './DeviceService';
 import {messageStorageService} from './MessageStorageService';
 import axios from 'axios';
 
-// Backend API URL helper - Always use production URL for Socket.io
-// This ensures consistent connection across all devices (emulator, physical device, etc.)
+// Backend API URL - Always use production URL
 const getApiBaseUrl = () => {
-  // Always use production URL - no local development URLs
   return 'https://communication-vault.onrender.com';
 };
 
 class ChatService {
   private socket: Socket | null = null;
   private isAuthenticated: boolean = false;
-  private connectionStable: boolean = false; // Track if connection is stable
-  private pendingMessages: Array<{
-    messageData: any;
-    optimisticMessage: Message;
-    resolve: (message: Message) => void;
-    timeout: NodeJS.Timeout;
-    retries: number;
-  }> = []; // Queue for messages that fail to send
+  private connectionPromise: Promise<void> | null = null;
   private messageListeners: ((message: Message) => void)[] = [];
   private chatListeners: ((chat: Chat) => void)[] = [];
   private messageStatusListeners: ((update: {
@@ -40,328 +31,197 @@ class ChatService {
   }
 
   async connect(): Promise<void> {
-    // Verify socket is actually connected, authenticated, and stable before returning early
-    if (this.socket?.connected && this.isAuthenticated && this.connectionStable) {
-      // Double-check by verifying socket state
-      if (this.socket.id) {
-        console.log('✅ Socket already connected, authenticated, and stable');
-        return Promise.resolve();
-      } else {
-        // Socket says connected but no ID - reset and reconnect
-        console.warn('⚠️ Socket state inconsistent, reconnecting...');
-        this.isAuthenticated = false;
-        this.connectionStable = false;
-        if (this.socket) {
-          this.socket.disconnect();
-          this.socket = null;
-        }
-      }
+    // If already connected and authenticated, return immediately
+    if (this.socket?.connected && this.isAuthenticated && this.socket.id) {
+      return Promise.resolve();
     }
 
-    return new Promise((resolve, reject) => {
-      // Get device info for authentication
-      deviceService.getDeviceInfo().then(deviceInfo => {
-        // Get API URL based on environment
+    // If connection is in progress, wait for it
+    if (this.connectionPromise) {
+      return this.connectionPromise;
+    }
+
+    // Start new connection
+    this.connectionPromise = new Promise(async (resolve, reject) => {
+      try {
+        const deviceInfo = await deviceService.getDeviceInfo();
         const apiUrl = getApiBaseUrl();
 
         console.log(`🔌 Connecting to chat server: ${apiUrl}`);
 
-        // Reset authentication status and stability
-        this.isAuthenticated = false;
-        this.connectionStable = false;
-
         // Disconnect existing socket if any
         if (this.socket) {
-          // Remove all listeners to prevent duplicates
           this.socket.removeAllListeners();
           this.socket.disconnect();
           this.socket = null;
         }
 
+        this.isAuthenticated = false;
+
+        // Create socket with simpler configuration
         this.socket = io(apiUrl, {
           auth: {
             deviceId: deviceInfo.deviceId,
             uniqueCode: deviceInfo.uniqueCode,
             deviceName: deviceInfo.deviceName,
           },
-          transports: ['polling', 'websocket'], // Try polling first, then upgrade to websocket
+          transports: ['polling', 'websocket'],
           reconnection: true,
-          reconnectionAttempts: Infinity, // Keep trying forever
-          reconnectionDelay: 2000, // Increased for Render cold starts
-          reconnectionDelayMax: 10000, // Increased max delay
-          timeout: 60000, // Increased to 60 seconds for Render cold starts
-          forceNew: true, // Force new connection
-          upgrade: true, // Allow upgrade from polling to websocket
-          rememberUpgrade: false,
+          reconnectionAttempts: 5,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
+          timeout: 20000,
+          // Remove forceNew - let socket.io manage connections naturally
         });
 
-        let resolved = false;
-        let connectionTimeout: NodeJS.Timeout | null = null;
-        let authTimeout: NodeJS.Timeout | null = null;
+        let authReceived = false;
 
-        // Set up connection timeout (longer for Render cold starts)
-        connectionTimeout = setTimeout(() => {
-          if (!this.socket?.connected && !resolved) {
-            console.error('❌ Connection timeout after 60 seconds');
-            if (!resolved) {
-              resolved = true;
-              reject(new Error('Connection timeout'));
-            }
-          }
-        }, 60000); // 60 seconds timeout for Render cold starts
-
-        // Set up authentication timeout - CRITICAL: Don't resolve if not authenticated
-        authTimeout = setTimeout(() => {
-          if (!this.isAuthenticated && !resolved) {
-            console.error('❌ Authentication timeout after 30 seconds');
-            if (!resolved) {
-              resolved = true;
-              reject(new Error('Authentication timeout'));
-            }
-          }
-        }, 30000); // 30 seconds for auth (increased for Render cold starts)
-
+        // Connection successful
         this.socket.on('connect', () => {
-          console.log('✅ Socket connected, waiting for authentication...');
-          console.log('Socket ID:', this.socket?.id);
-          // Don't resolve yet - wait for 'connected' event
+          console.log('✅ Socket connected, Socket ID:', this.socket?.id);
         });
 
+        // Authentication confirmed by server
+        this.socket.on('connected', (data) => {
+          console.log('✅ Authenticated:', data);
+          this.isAuthenticated = true;
+          authReceived = true;
+          
+          if (this.connectionPromise) {
+            this.connectionPromise = null;
+          }
+          resolve();
+        });
+
+        // Connection errors
         this.socket.on('connect_error', (error: any) => {
           console.error('❌ Connection error:', error.message);
           this.isAuthenticated = false;
-          // Don't reject immediately - let reconnection handle it
-          // Only reject if it's a critical error
-          if (error.message.includes('timeout') && !resolved) {
-            // For timeout errors, wait a bit longer before rejecting
+          
+          // Only reject if we haven't received auth yet
+          if (!authReceived) {
             setTimeout(() => {
-              if (!this.socket?.connected && !resolved) {
-                resolved = true;
+              if (!this.isAuthenticated && !authReceived) {
+                this.connectionPromise = null;
                 reject(error);
               }
             }, 5000);
-          } else if (!error.message.includes('timeout') && !resolved) {
-            // For non-timeout errors, reject immediately
-            resolved = true;
-            reject(error);
           }
         });
 
+        // Disconnect handler
         this.socket.on('disconnect', (reason) => {
-          console.log('⚠️ Chat disconnected:', reason);
+          console.log('⚠️ Disconnected:', reason);
           this.isAuthenticated = false;
-          this.connectionStable = false; // Reset stability flag
           
-          // Clear any pending message timeouts since connection is lost
-          this.pendingMessages.forEach(pending => {
-            clearTimeout(pending.timeout);
-          });
-          
-          // Handle different disconnect reasons
+          // Auto-reconnect will handle it, but reset auth
           if (reason === 'io server disconnect') {
-            // Server disconnected, reconnect manually
-            console.log('🔄 Server disconnected, attempting to reconnect...');
             this.socket?.connect();
-          } else if (reason === 'transport error' || reason === 'transport close') {
-            // Transport error - socket.io will auto-reconnect, but reset auth state
-            console.log('🔄 Transport error, will auto-reconnect...');
-            this.isAuthenticated = false;
-            this.connectionStable = false;
-          } else if (reason === 'ping timeout') {
-            // Ping timeout - connection lost
-            console.log('🔄 Ping timeout, will reconnect...');
-            this.isAuthenticated = false;
-            this.connectionStable = false;
           }
-        });
-
-        // CRITICAL: Wait for server authentication confirmation
-        this.socket.on('connected', (data) => {
-          console.log('✅ Connection confirmed by server (authenticated):', data);
-          
-          // Wait a moment to ensure connection is stable before marking as authenticated
-          setTimeout(() => {
-            // Double-check socket is still connected before marking as authenticated
-            if (this.socket?.connected && this.socket?.id) {
-              this.isAuthenticated = true;
-              this.connectionStable = false; // Reset stability flag
-              
-              // Wait additional time to ensure connection is truly stable
-              setTimeout(() => {
-                if (this.socket?.connected && this.socket?.id) {
-                  this.connectionStable = true;
-                  console.log('✅ Socket authenticated and stable');
-                  
-                  // Retry pending messages now that connection is stable
-                  this.retryPendingMessages();
-                } else {
-                  console.warn('⚠️ Socket disconnected during stability check');
-                  this.isAuthenticated = false;
-                  this.connectionStable = false;
-                }
-              }, 1000); // Wait 1 second to verify stability
-              
-              if (connectionTimeout) {
-                clearTimeout(connectionTimeout);
-              }
-              if (authTimeout) {
-                clearTimeout(authTimeout);
-              }
-              
-              if (!resolved) {
-                resolved = true;
-                resolve();
-              }
-            } else {
-              console.warn('⚠️ Socket disconnected before authentication completed');
-              this.isAuthenticated = false;
-              this.connectionStable = false;
-            }
-          }, 500); // Wait 500ms to ensure connection is stable
         });
 
         // Set up event listeners
         this.setupEventListeners();
 
-        // If socket connects quickly, still wait for authentication
-        if (this.socket.connected) {
-          console.log('✅ Socket connected immediately, waiting for authentication...');
-        }
-      }).catch((error) => {
-        console.error('❌ Error getting device info:', error);
+        // Timeout after 30 seconds if no auth
+        setTimeout(() => {
+          if (!this.isAuthenticated && !authReceived) {
+            console.error('❌ Authentication timeout');
+            this.connectionPromise = null;
+            reject(new Error('Authentication timeout'));
+          }
+        }, 30000);
+
+      } catch (error: any) {
+        this.connectionPromise = null;
         reject(error);
-      });
+      }
     });
+
+    return this.connectionPromise;
   }
 
-  private setupEventListeners() {
+  private setupEventListeners(): void {
     if (!this.socket) return;
 
-    this.socket.on('new_message', async (message: Message) => {
-      console.log('📨 New message received:', message.id, 'from:', message.senderId);
-      
-      // Store message locally (non-blocking for speed)
-      messageStorageService.saveMessage(message).catch(err => 
-        console.error('Error saving message:', err)
-      );
-      
-      // Ensure chat exists for this message (create if needed)
+    // New message received
+    this.socket.on('new_message', async (messageData: any) => {
       try {
-        const {chatStorageService} = await import('./ChatStorageService');
-        const {deviceService} = await import('./DeviceService');
-        const currentDevice = await deviceService.getDeviceInfo();
-        
-        // Check if chat exists
-        const chats = await chatStorageService.getChats();
-        let chat = chats.find(c => c.id === message.chatId);
-        
-        // If not found by chatId, try to find by participant IDs
-        if (!chat) {
-          chat = chats.find(c => 
-            c.participantIds?.includes(message.senderId) || 
-            c.participantIds?.includes(message.receiverId)
-          );
-        }
-        
-        if (!chat && message.senderId !== currentDevice.deviceId) {
-          // Create chat for unknown device with "Unknown User" name
-          const senderDeviceId = message.senderId;
-          const senderUniqueCode = senderDeviceId.substring(0, 8).toUpperCase();
-          const senderName = 'Unknown User'; // Default name until user edits it
-          
-          console.log('📝 Creating new chat for unknown device:', senderDeviceId);
-          
-          chat = await chatStorageService.getOrCreateChat(
-            senderDeviceId,
-            senderName,
-            senderUniqueCode
-          );
-          
-          // Update message chatId if chat was created with different ID
-          if (chat.id !== message.chatId) {
-            message.chatId = chat.id;
-            await messageStorageService.saveMessage(message);
-          }
-        }
-        
-        // Update chat with message (increments unread count if from other user)
-        if (chat) {
-          await chatStorageService.updateChatWithMessage(chat.id, message);
-          console.log('✅ Chat updated with message:', chat.id);
-        }
-      } catch (error) {
-        console.error('❌ Error ensuring chat exists:', error);
-      }
-      
-      // Notify listeners immediately (optimistic update)
-      console.log('🔔 Notifying message listeners');
-      this.messageListeners.forEach(listener => listener(message));
-    });
-
-    this.socket.on('chat_updated', (chat: Chat) => {
-      this.chatListeners.forEach(listener => listener(chat));
-    });
-
-    // Listen for message status updates
-    this.socket.on('message_status_update', async (update: {
-      messageId: string;
-      chatId: string;
-      status: Message['status'];
-      deliveredAt?: string;
-      readAt?: string;
-    }) => {
-      // Update local storage (non-blocking)
-      messageStorageService.updateMessageStatus(
-        update.chatId,
-        update.messageId,
-        update.status,
-        update.deliveredAt,
-        update.readAt,
-      ).catch(err => console.error('Error updating status:', err));
-      
-      // Notify listeners immediately
-      this.messageStatusListeners.forEach(listener => listener(update));
-    });
-
-    // Listen for message deletion
-    this.socket.on('message_deleted', async (data: {chatId: string; messageId: string}) => {
-      messageStorageService.deleteMessage(data.chatId, data.messageId).catch(err => 
-        console.error('Error deleting message:', err)
-      );
-      // Notify listeners immediately
-      this.messageListeners.forEach(listener => {
-        const deletedMessage: Message = {
-          id: data.messageId,
-          chatId: data.chatId,
-          senderId: '',
-          receiverId: '',
-          type: 'text',
-          content: '',
-          isDeleted: true,
-          isViewOnce: false,
-          status: 'sent',
-          createdAt: new Date().toISOString(),
+        const message: Message = {
+          id: messageData.id || messageData._id || uuidv4(),
+          chatId: messageData.chatId || messageData.chat_id,
+          senderId: messageData.senderId || messageData.sender_id,
+          receiverId: messageData.receiverId || messageData.receiver_id,
+          type: messageData.type || 'text',
+          content: messageData.content || '',
+          mediaUrl: messageData.mediaUrl || messageData.media_url,
+          thumbnailUrl: messageData.thumbnailUrl || messageData.thumbnail_url,
+          fileName: messageData.fileName || messageData.file_name,
+          fileSize: messageData.fileSize || messageData.file_size,
+          duration: messageData.duration,
+          isViewOnce: messageData.isViewOnce || messageData.is_view_once || false,
+          autoDeleteAfter: messageData.autoDeleteAfter || messageData.auto_delete_after,
+          status: messageData.status || 'sent',
+          sentAt: messageData.sentAt || messageData.sent_at || new Date().toISOString(),
+          deliveredAt: messageData.deliveredAt || messageData.delivered_at,
+          readAt: messageData.readAt || messageData.read_at,
+          createdAt: messageData.createdAt || messageData.created_at || new Date().toISOString(),
         };
-        listener(deletedMessage);
-      });
+
+        // Save to local storage
+        await messageStorageService.saveMessage(message);
+
+        // Notify listeners
+        this.messageListeners.forEach(listener => listener(message));
+      } catch (error: any) {
+        console.error('Error handling new message:', error);
+      }
+    });
+
+    // Message status update
+    this.socket.on('message_status_update', (update: any) => {
+      this.messageStatusListeners.forEach(listener => listener({
+        messageId: update.messageId || update.message_id,
+        chatId: update.chatId || update.chat_id,
+        status: update.status,
+        deliveredAt: update.deliveredAt || update.delivered_at,
+        readAt: update.readAt || update.read_at,
+      }));
+    });
+
+    // Chat updated
+    this.socket.on('chat_updated', (chatData: any) => {
+      const chat: Chat = {
+        id: chatData.id || chatData._id,
+        participantIds: chatData.participantIds || chatData.participant_ids || [],
+        otherUser: chatData.otherUser || chatData.other_user,
+        lastMessage: chatData.lastMessage || chatData.last_message,
+        unreadCount: chatData.unreadCount || chatData.unread_count || 0,
+        isBlocked: chatData.isBlocked || chatData.is_blocked || false,
+        createdAt: chatData.createdAt || chatData.created_at,
+        updatedAt: chatData.updatedAt || chatData.updated_at,
+      };
+      this.chatListeners.forEach(listener => listener(chat));
     });
   }
 
-  disconnect() {
+  async disconnect(): Promise<void> {
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
     }
+    this.isAuthenticated = false;
+    this.connectionPromise = null;
   }
 
-  onMessage(listener: (message: Message) => void) {
+  onMessage(listener: (message: Message) => void): () => void {
     this.messageListeners.push(listener);
     return () => {
       this.messageListeners = this.messageListeners.filter(l => l !== listener);
     };
   }
 
-  onChatUpdate(listener: (chat: Chat) => void) {
+  onChatUpdate(listener: (chat: Chat) => void): () => void {
     this.chatListeners.push(listener);
     return () => {
       this.chatListeners = this.chatListeners.filter(l => l !== listener);
@@ -382,16 +242,9 @@ class ChatService {
   }
 
   async deleteMessage(chatId: string, messageId: string): Promise<void> {
-    // Mark as deleted locally immediately (optimistic)
     await messageStorageService.deleteMessage(chatId, messageId);
-
-    // Emit delete event to server if connected
-    if (this.socket?.connected) {
+    if (this.socket?.connected && this.isAuthenticated) {
       this.socket.emit('delete_message', {chatId, messageId});
-    } else {
-      console.warn('⚠️ Socket not connected, deletion saved locally and will sync when connected');
-      // Try to connect in background
-      this.connect().catch(err => console.warn('Background connection failed:', err));
     }
   }
 
@@ -414,75 +267,7 @@ class ChatService {
       receiverUniqueCode?: string;
     },
   ): Promise<Message> {
-    // CRITICAL: Ensure socket is connected, authenticated, and stable before sending
-    if (!this.socket?.connected || !this.isAuthenticated || !this.connectionStable) {
-      console.log('⚠️ Socket not connected/authenticated, attempting to connect...');
-      try {
-        // Try to connect and wait for authentication - this will throw if it fails
-        await this.connect();
-        
-          // Wait for connection to stabilize (important for Render cold starts)
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
-          // Double-check authentication and stability after connect
-          if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
-            // If not stable yet, wait a bit more
-            if (this.isAuthenticated && this.socket?.connected && this.socket?.id && !this.connectionStable) {
-              console.log('⏳ Waiting for connection to stabilize...');
-              await new Promise(resolve => setTimeout(resolve, 3000));
-            }
-            
-            if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
-              throw new Error('Socket not stable after connection');
-            }
-          }
-        
-        console.log('✅ Socket connected and authenticated successfully');
-      } catch (err: any) {
-        console.error('❌ Connection attempt failed:', err.message);
-        // Try one more time after a short delay
-        try {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          await this.connect();
-          
-          // Wait for stabilization again
-          await new Promise(resolve => setTimeout(resolve, 1500));
-          
-          if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
-            // Wait a bit more for stability
-            if (this.isAuthenticated && this.socket?.connected && this.socket?.id && !this.connectionStable) {
-              await new Promise(resolve => setTimeout(resolve, 2000));
-            }
-            
-            if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
-              throw new Error('Socket still not stable after retry');
-            }
-          }
-        } catch (retryErr: any) {
-          console.error('❌ Retry connection also failed:', retryErr.message);
-          // Still allow optimistic sending, but log the error
-        }
-      }
-    }
-
-    // Verify connection and authentication status
-    if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
-      console.error('❌ Socket not available/authenticated:', {
-        exists: !!this.socket,
-        connected: this.socket?.connected,
-        authenticated: this.isAuthenticated,
-      });
-      // Still proceed with optimistic sending, but try to connect in background
-      if (!this.socket) {
-        this.connect().catch(err => console.error('Background connection failed:', err));
-      } else {
-        this.connect().catch(err => console.error('Background reconnection failed:', err));
-      }
-    } else {
-      console.log('✅ Socket connected and authenticated, sending message...');
-    }
-
-    // Upload media file if provided
+    // Upload media if provided
     let mediaUrl: string | undefined;
     let thumbnailUrl: string | undefined;
     let fileName: string | undefined;
@@ -490,7 +275,6 @@ class ChatService {
 
     if (mediaUri && type !== 'text') {
       try {
-        // Determine media type from message type
         let mediaType: 'image' | 'video' | 'document' | 'voice' = 'image';
         if (type === 'video') mediaType = 'video';
         else if (type === 'document') mediaType = 'document';
@@ -511,15 +295,15 @@ class ChatService {
       }
     }
 
-    // Get device info for sender
+    // Get device info
     const deviceInfo = await deviceService.getDeviceInfo();
 
-    // Allow sending to non-app users (receiverId can be undefined)
+    // Create optimistic message
     const message: Message = {
       id: uuidv4(),
       chatId,
-      senderId: deviceInfo.deviceId, // Use device ID as sender
-      receiverId: receiverId || '',
+      senderId: deviceInfo.deviceId,
+      receiverId,
       type,
       content,
       mediaUrl,
@@ -529,286 +313,95 @@ class ChatService {
       duration: options?.duration,
       isViewOnce: options?.isViewOnce || false,
       autoDeleteAfter: options?.autoDeleteAfter,
-      isDeleted: false,
-      status: 'sending', // Initial status
+      status: 'sending',
+      sentAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
     };
 
-    // Add non-app user info and receiverUniqueCode to message data
-    const messageData: any = {...message};
-    if (options && !options.isAppUser) {
-      messageData.phoneNumber = options.phoneNumber;
-      messageData.contactName = options.contactName;
-      messageData.email = options.email;
-    }
-    if (options?.receiverUniqueCode) {
-      messageData.receiverUniqueCode = options.receiverUniqueCode;
-    }
+    // Save locally immediately
+    await messageStorageService.saveMessage(message);
 
-    return new Promise((resolve) => {
-      // Store message locally immediately (optimistic update)
-      messageStorageService.saveMessage(message).catch(err => 
-        console.error('Error storing message locally:', err)
-      );
-
-      // Set up response timeout (longer for Render cold starts)
-      const responseTimeout = setTimeout(() => {
-        console.warn('⏱️ No response from server after 20 seconds, using optimistic message');
-        // Remove from pending queue if it exists
-        const pendingIndex = this.pendingMessages.findIndex(p => p.resolve === resolve);
-        if (pendingIndex > -1) {
-          this.pendingMessages.splice(pendingIndex, 1);
-        }
-        resolve(message); // Resolve optimistically
-      }, 20000); // 20 second timeout for Render cold starts
-
-      // If socket is not initialized, not connected, or not authenticated, try to connect first
-      if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
-        console.warn('⚠️ Socket not available/authenticated, attempting connection before sending...');
-        
-        // Try to connect synchronously one more time
-        this.connect()
-          .then(() => {
-            // Connection successful, proceed with sending
-            if (this.socket?.connected && this.isAuthenticated) {
-              this.sendMessageToServer(messageData, message, resolve, responseTimeout);
-            } else {
-              console.warn('⚠️ Still not authenticated after connect, saving locally');
-              clearTimeout(responseTimeout);
-              resolve(message);
-            }
-          })
-          .catch((err) => {
-            console.error('❌ Final connection attempt failed, saving locally:', err);
-            clearTimeout(responseTimeout);
-            // Resolve optimistically - message is saved locally
-            resolve(message);
-          });
-        return;
+    // Try to connect if not connected
+    if (!this.socket?.connected || !this.isAuthenticated) {
+      try {
+        await this.connect();
+      } catch (error) {
+        console.warn('⚠️ Could not connect, message saved locally:', error);
+        // Update status to failed but keep message
+        message.status = 'failed';
+        await messageStorageService.saveMessage(message);
+        return message;
       }
-
-      // Socket is connected and authenticated, send message
-      this.sendMessageToServer(messageData, message, resolve, responseTimeout);
-    });
-  }
-
-  private sendMessageToServer(
-    messageData: any,
-    optimisticMessage: Message,
-    resolve: (message: Message) => void,
-    responseTimeout: NodeJS.Timeout
-  ) {
-    // Double-check socket state right before sending
-    if (!this.socket) {
-      console.error('❌ Cannot send message: socket does not exist');
-      resolve(optimisticMessage);
-      return;
     }
 
-    // Verify socket is actually connected, authenticated, stable, and has an ID
-    if (!this.socket.connected || !this.isAuthenticated || !this.connectionStable || !this.socket.id) {
-      console.error('❌ Cannot send message: socket not connected/authenticated/stable');
-      console.log('Socket state:', {
-        exists: !!this.socket,
-        connected: this.socket?.connected,
-        authenticated: this.isAuthenticated,
-        stable: this.connectionStable,
-        socketId: this.socket?.id,
-      });
-      
-      // Try to reconnect if socket exists but not connected
-      if (this.socket && !this.socket.connected) {
-        console.log('🔄 Attempting to reconnect before sending...');
-        this.connect().catch(err => console.error('Reconnection failed:', err));
-      }
-      
-      resolve(optimisticMessage);
-      return;
-    }
-
-    // Final check - verify socket is still connected right before emit
-    if (!this.socket.connected || !this.socket.id) {
-      console.error('❌ Socket disconnected between checks');
-      resolve(optimisticMessage);
-      return;
-    }
-
-    console.log('📤 Emitting send_message:', {
-      chatId: messageData.chatId,
-      receiverId: messageData.receiverId,
-      receiverUniqueCode: messageData.receiverUniqueCode,
-      type: messageData.type,
-      contentLength: messageData.content?.length || 0,
-      socketId: this.socket.id,
-      connected: this.socket.connected,
-    });
-
-    // Add error handler for the emit itself
-    const emitErrorHandler = (error: any) => {
-      console.error('❌ Error emitting send_message:', error);
-      clearTimeout(responseTimeout);
-      resolve(optimisticMessage);
+    // Prepare message data
+    const messageData: any = {
+      chatId,
+      receiverId,
+      receiverUniqueCode: options?.receiverUniqueCode,
+      type,
+      content,
+      mediaUrl,
+      thumbnailUrl,
+      fileName,
+      fileSize,
+      duration: options?.duration,
+      isViewOnce: options?.isViewOnce,
+      autoDeleteAfter: options?.autoDeleteAfter,
+      phoneNumber: options?.phoneNumber,
+      contactName: options?.contactName,
+      email: options?.email,
     };
 
-    try {
-      // Check one more time right before emit - verify stability
-      if (!this.socket.connected || !this.socket.id || !this.connectionStable) {
-        console.error('❌ Socket disconnected or unstable right before emit');
-        console.log('Final check:', {
-          connected: this.socket.connected,
-          socketId: this.socket.id,
-          stable: this.connectionStable,
-        });
-        clearTimeout(responseTimeout);
-        resolve(optimisticMessage);
-        return;
-      }
+    return new Promise((resolve) => {
+      // Set timeout for response
+      const timeout = setTimeout(() => {
+        console.warn('⏱️ No response from server, using optimistic message');
+        message.status = 'sent';
+        messageStorageService.saveMessage(message).catch(console.error);
+        resolve(message);
+      }, 15000);
 
-      // Store pending message for retry if connection fails
-      const pendingMessage = {
-        messageData,
-        optimisticMessage,
-        resolve,
-        timeout: responseTimeout,
-        retries: 0,
-      };
-      
-      // Add to pending queue
-      this.pendingMessages.push(pendingMessage);
-      
-      // Monitor connection state during emit
-      const wasConnected = this.socket.connected;
-      const socketId = this.socket.id;
-      
-      this.socket.emit('send_message', messageData, async (response: any) => {
-        try {
-          // Remove from pending queue since we got a response
-          const index = this.pendingMessages.indexOf(pendingMessage);
-          if (index > -1) {
-            this.pendingMessages.splice(index, 1);
-          }
-          
-          clearTimeout(responseTimeout);
-          console.log('📥 Received response from server:', response);
+      // Send message
+      if (this.socket?.connected && this.isAuthenticated) {
+        console.log('📤 Sending message:', {chatId, type, contentLength: content.length});
         
-          // Handle undefined or null response
-          if (!response) {
-            console.warn('⚠️ No response from server, using optimistic message');
-            resolve(optimisticMessage);
+        this.socket.emit('send_message', messageData, async (response: any) => {
+          clearTimeout(timeout);
+          
+          if (response?.error) {
+            console.error('❌ Server error:', response.error);
+            message.status = 'failed';
+            await messageStorageService.saveMessage(message);
+            resolve(message);
             return;
           }
 
-          if (response.error) {
-            console.error('❌ Server error:', response.error);
-            // For all errors, resolve optimistically (message is saved locally)
-            console.warn('⚠️ Server error but keeping message locally:', response.error);
-            resolve(optimisticMessage);
-          } else if (response.message) {
-            console.log('✅ Message sent successfully:', response.message.id);
-            // Update local storage with server response (includes server ID, timestamps, etc.)
-            const serverMessage = response.message;
+          if (response?.message) {
+            console.log('✅ Message sent successfully');
+            const serverMessage: Message = {
+              ...message,
+              id: response.message.id || response.message._id || message.id,
+              status: 'sent',
+              sentAt: response.message.sentAt || response.message.sent_at || message.sentAt,
+            };
             await messageStorageService.saveMessage(serverMessage);
-            
-            // Also update chat with the sent message
-            try {
-              const {chatStorageService} = await import('./ChatStorageService');
-              await chatStorageService.updateChatWithMessage(optimisticMessage.chatId, serverMessage);
-            } catch (err) {
-              console.error('Error updating chat:', err);
-            }
-            
             resolve(serverMessage);
           } else {
-            // If no error and no message, assume success and use the optimistic message
-            console.warn('⚠️ Server response missing message field, using optimistic message');
-            resolve(optimisticMessage);
+            // No error but no message - assume success
+            message.status = 'sent';
+            await messageStorageService.saveMessage(message);
+            resolve(message);
           }
-        } catch (error: any) {
-          // Remove from pending queue on error
-          const index = this.pendingMessages.indexOf(pendingMessage);
-          if (index > -1) {
-            this.pendingMessages.splice(index, 1);
-          }
-          
-          clearTimeout(responseTimeout);
-          console.error('❌ Error handling send_message response:', error);
-          // Resolve optimistically instead of rejecting
-          console.warn('⚠️ Resolving optimistically due to error');
-          resolve(optimisticMessage);
-        }
-      });
-      
-      // Check if socket disconnected right after emit
-      setTimeout(() => {
-        if (!this.socket?.connected || this.socket?.id !== socketId) {
-          console.warn('⚠️ Socket disconnected right after emit, message may not have been sent');
-          // Don't remove from pending - let timeout handle it or retry when reconnected
-        }
-      }, 100);
-    } catch (error: any) {
-      console.error('❌ Error emitting send_message:', error);
-      clearTimeout(responseTimeout);
-      
-      // Remove from pending queue on error
-      const index = this.pendingMessages.findIndex(p => p.resolve === resolve);
-      if (index > -1) {
-        this.pendingMessages.splice(index, 1);
-      }
-      
-      resolve(optimisticMessage);
-    }
-  }
-
-  private async retryPendingMessages(): Promise<void> {
-    if (this.pendingMessages.length === 0) {
-      return;
-    }
-
-    console.log(`🔄 Retrying ${this.pendingMessages.length} pending messages...`);
-    
-    // Filter out messages that have exceeded max retries
-    const messagesToRetry = this.pendingMessages.filter(p => p.retries < 3);
-    const messagesToRemove = this.pendingMessages.filter(p => p.retries >= 3);
-    
-    // Remove messages that exceeded retries
-    messagesToRemove.forEach(pending => {
-      clearTimeout(pending.timeout);
-      const index = this.pendingMessages.indexOf(pending);
-      if (index > -1) {
-        this.pendingMessages.splice(index, 1);
-      }
-      console.warn(`⚠️ Message exceeded max retries, using optimistic message`);
-      pending.resolve(pending.optimisticMessage);
-    });
-    
-    // Retry remaining messages
-    for (const pending of messagesToRetry) {
-      pending.retries++;
-      clearTimeout(pending.timeout);
-      
-      // Wait a bit before retrying
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      if (this.socket?.connected && this.isAuthenticated && this.connectionStable && this.socket?.id) {
-        console.log(`🔄 Retrying message (attempt ${pending.retries})...`);
-        this.sendMessageToServer(
-          pending.messageData,
-          pending.optimisticMessage,
-          pending.resolve,
-          setTimeout(() => {
-            // Timeout handler - remove from queue and resolve optimistically
-            const index = this.pendingMessages.indexOf(pending);
-            if (index > -1) {
-              this.pendingMessages.splice(index, 1);
-            }
-            console.warn(`⏱️ Retry timeout, using optimistic message`);
-            pending.resolve(pending.optimisticMessage);
-          }, 20000)
-        );
+        });
       } else {
-        console.warn(`⚠️ Cannot retry - socket not ready`);
+        clearTimeout(timeout);
+        console.warn('⚠️ Socket not connected, message saved locally');
+        message.status = 'failed';
+        await messageStorageService.saveMessage(message);
+        resolve(message);
       }
-    }
+    });
   }
 
   async createChat(params: {
@@ -817,104 +410,57 @@ class ChatService {
     contactName?: string;
     contactEmail?: string;
   }): Promise<Chat> {
-    // Create chat locally (optimistic)
     const chatId = params.userId ? `chat_${params.userId}` : `chat_${params.phoneNumber}`;
     
-    return new Promise((resolve) => {
-      // Return chat immediately (optimistic)
-      const chat: Chat = {
-        id: chatId,
-        participantIds: params.userId ? [params.userId] : [],
-        otherUser: params.userId ? undefined : {
-          id: undefined,
-          name: params.contactName || 'Unknown User',
-          isAppUser: false,
-        },
-        lastMessage: undefined,
-        unreadCount: 0,
-        isBlocked: false,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      
-      resolve(chat);
-      
-      // Try to sync with server if connected
-      if (this.socket?.connected) {
-        // Server sync can happen in background
-      } else {
-        console.warn('⚠️ Socket not connected, chat created locally');
-        this.connect().catch(err => console.warn('Background connection failed:', err));
-      }
-
-      // The backend will create chat automatically when first message is sent
-      resolve({
-        id: params.userId ? `chat_${params.userId}` : `chat_${params.phoneNumber}`,
-        participantIds: params.userId ? [params.userId] : [],
-        otherUser: params.userId ? undefined : {
-          id: undefined,
-          name: params.contactName,
-          isAppUser: false,
-        },
-        lastMessage: undefined,
-        unreadCount: 0,
-        isBlocked: false,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-    });
-  }
-
-  async getChats(): Promise<Chat[]> {
-    // In production, fetch from API
-    return [];
-  }
-
-  async getMessages(chatId: string): Promise<Message[]> {
-    try {
-      // Get messages from local storage (primary source)
-      // Socket.io will sync messages in real-time
-      const localMessages = await messageStorageService.getMessages(chatId);
-      
-      // Return sorted messages
-      return localMessages.sort((a, b) => 
-        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      );
-    } catch (error: any) {
-      console.error('Error fetching messages:', error);
-      return [];
-    }
+    const chat: Chat = {
+      id: chatId,
+      participantIds: params.userId ? [params.userId] : [],
+      otherUser: params.userId ? undefined : {
+        id: undefined,
+        name: params.contactName || 'Unknown User',
+        isAppUser: false,
+      },
+      lastMessage: undefined,
+      unreadCount: 0,
+      isBlocked: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    
+    return chat;
   }
 
   async markAsRead(chatId: string, messageIds: string[]): Promise<void> {
-    // Ensure socket is connected and authenticated before marking as read
-    if (!this.socket?.connected || !this.isAuthenticated) {
-      console.log('⚠️ Socket not connected/authenticated, attempting to connect...');
-      try {
-        await this.connect();
-        
-        // Double-check after connection
-        if (!this.socket?.connected || !this.isAuthenticated) {
-          console.warn('⚠️ Still not authenticated after connect, skipping mark as read');
-          return;
-        }
-      } catch (err: any) {
-        console.error('❌ Connection failed for mark as read:', err.message);
-        return;
-      }
+    if (this.socket?.connected && this.isAuthenticated) {
+      this.socket.emit('mark_read', {
+        chatId,
+        messageIds,
+      });
     }
     
-    // Use socket.io for marking as read
-    if (this.socket?.connected && this.isAuthenticated) {
-      console.log('📖 Marking messages as read via socket:', {chatId, messageIds});
-      this.socket.emit('mark_read', {chatId, messageIds});
-    } else {
-      console.warn('⚠️ Socket not connected/authenticated, skipping mark as read');
+    // Update locally regardless
+    for (const messageId of messageIds) {
+      await messageStorageService.updateMessageStatus(chatId, messageId, 'read');
     }
   }
 
+  async joinChat(chatId: string): Promise<void> {
+    if (this.socket?.connected && this.isAuthenticated) {
+      this.socket.emit('join_chat', {chatId});
+    }
+  }
+
+  async leaveChat(chatId: string): Promise<void> {
+    if (this.socket?.connected && this.isAuthenticated) {
+      this.socket.emit('leave_chat', {chatId});
+    }
+  }
+
+  async sendTypingIndicator(chatId: string, isTyping: boolean): Promise<void> {
+    if (this.socket?.connected && this.isAuthenticated) {
+      this.socket.emit('typing', {chatId, isTyping});
+    }
+  }
 }
 
 export const chatService = new ChatService();
-export {ChatService};
-
