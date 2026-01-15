@@ -413,6 +413,17 @@ class ChatService {
         console.error('Error storing message locally:', err)
       );
 
+      // If socket is not initialized or not connected, resolve optimistically
+      if (!this.socket || !this.socket.connected) {
+        console.warn('⚠️ Socket not available, message saved locally and will sync when connected');
+        // Try to initialize socket in background if not initialized
+        if (!this.socket) {
+          this.connect().catch(err => console.warn('Background connection failed:', err));
+        }
+        resolve(message);
+        return;
+      }
+
       console.log('📤 Emitting send_message:', {
         chatId,
         receiverId,
@@ -420,15 +431,6 @@ class ChatService {
         type,
         contentLength: content.length,
       });
-
-      // If socket is not connected, resolve optimistically and queue for later
-      if (!this.socket?.connected) {
-        console.warn('⚠️ Socket not connected, message will be sent when connection is restored');
-        // Resolve optimistically - message is saved locally
-        // When socket reconnects, it will sync
-        resolve(message);
-        return;
-      }
 
       // Set up response timeout
       const responseTimeout = setTimeout(() => {
