@@ -309,39 +309,35 @@ class ChatService {
       receiverUniqueCode?: string;
     },
   ): Promise<Message> {
-    // CRITICAL: Ensure connection before sending
+    // CRITICAL: Try to connect if not connected (non-blocking)
     if (!this.socket?.connected) {
-      console.log('⚠️ Socket not connected, attempting to connect...');
-      try {
-        await this.connect();
-        // Wait for connection to fully establish
-        let retries = 0;
-        while (!this.socket?.connected && retries < 10) {
-          await new Promise(resolve => setTimeout(resolve, 200));
-          retries++;
-        }
-        
-        if (!this.socket?.connected) {
-          throw new Error('Connection timeout - socket not connected after retries');
-        }
-      } catch (error: any) {
-        console.error('❌ Connection error:', error);
-        throw new Error(`Failed to connect: ${error.message}`);
+      console.log('⚠️ Socket not connected, attempting to connect in background...');
+      // Start connection in background (don't wait)
+      this.connect().catch(err => {
+        console.warn('Background connection attempt:', err.message);
+        // Connection will retry automatically
+      });
+      
+      // Wait a bit for quick connections
+      let retries = 0;
+      while (!this.socket?.connected && retries < 5) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        retries++;
       }
     }
 
-    // Double check connection status
+    // Log connection status but don't throw error
     if (!this.socket || !this.socket.connected) {
-      console.error('❌ Socket still not connected after connect attempt');
+      console.warn('⚠️ Socket not connected, message will be sent optimistically');
       console.log('Socket state:', {
         exists: !!this.socket,
         connected: this.socket?.connected,
         disconnected: this.socket?.disconnected,
       });
-      throw new Error('Not connected to chat server. Please check your internet connection and try again.');
+      // Don't throw - allow optimistic sending
+    } else {
+      console.log('✅ Socket connected, sending message...');
     }
-
-    console.log('✅ Socket connected, sending message...');
 
     // Upload media file if provided
     let mediaUrl: string | undefined;
