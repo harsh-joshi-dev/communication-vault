@@ -18,6 +18,13 @@ class ChatService {
   private socket: Socket | null = null;
   private isAuthenticated: boolean = false;
   private connectionStable: boolean = false; // Track if connection is stable
+  private pendingMessages: Array<{
+    messageData: any;
+    optimisticMessage: Message;
+    resolve: (message: Message) => void;
+    timeout: NodeJS.Timeout;
+    retries: number;
+  }> = []; // Queue for messages that fail to send
   private messageListeners: ((message: Message) => void)[] = [];
   private chatListeners: ((chat: Chat) => void)[] = [];
   private messageStatusListeners: ((update: {
@@ -145,6 +152,11 @@ class ChatService {
           this.isAuthenticated = false;
           this.connectionStable = false; // Reset stability flag
           
+          // Clear any pending message timeouts since connection is lost
+          this.pendingMessages.forEach(pending => {
+            clearTimeout(pending.timeout);
+          });
+          
           // Handle different disconnect reasons
           if (reason === 'io server disconnect') {
             // Server disconnected, reconnect manually
@@ -179,6 +191,9 @@ class ChatService {
                 if (this.socket?.connected && this.socket?.id) {
                   this.connectionStable = true;
                   console.log('✅ Socket authenticated and stable');
+                  
+                  // Retry pending messages now that connection is stable
+                  this.retryPendingMessages();
                 } else {
                   console.warn('⚠️ Socket disconnected during stability check');
                   this.isAuthenticated = false;
@@ -406,21 +421,21 @@ class ChatService {
         // Try to connect and wait for authentication - this will throw if it fails
         await this.connect();
         
-        // Wait for connection to stabilize (important for Render cold starts)
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        
-        // Double-check authentication and stability after connect
-        if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
-          // If not stable yet, wait a bit more
-          if (this.isAuthenticated && this.socket?.connected && this.socket?.id && !this.connectionStable) {
-            console.log('⏳ Waiting for connection to stabilize...');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          }
+          // Wait for connection to stabilize (important for Render cold starts)
+          await new Promise(resolve => setTimeout(resolve, 2000));
           
+          // Double-check authentication and stability after connect
           if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
-            throw new Error('Socket not stable after connection');
+            // If not stable yet, wait a bit more
+            if (this.isAuthenticated && this.socket?.connected && this.socket?.id && !this.connectionStable) {
+              console.log('⏳ Waiting for connection to stabilize...');
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+            
+            if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
+              throw new Error('Socket not stable after connection');
+            }
           }
-        }
         
         console.log('✅ Socket connected and authenticated successfully');
       } catch (err: any) {
@@ -644,8 +659,30 @@ class ChatService {
         return;
       }
 
+      // Store pending message for retry if connection fails
+      const pendingMessage = {
+        messageData,
+        optimisticMessage,
+        resolve,
+        timeout: responseTimeout,
+        retries: 0,
+      };
+      
+      // Add to pending queue
+      this.pendingMessages.push(pendingMessage);
+      
+      // Monitor connection state during emit
+      const wasConnected = this.socket.connected;
+      const socketId = this.socket.id;
+      
       this.socket.emit('send_message', messageData, async (response: any) => {
         try {
+          // Remove from pending queue since we got a response
+          const index = this.pendingMessages.indexOf(pendingMessage);
+          if (index > -1) {
+            this.pendingMessages.splice(index, 1);
+          }
+          
           clearTimeout(responseTimeout);
           console.log('📥 Received response from server:', response);
         
@@ -682,6 +719,12 @@ class ChatService {
             resolve(optimisticMessage);
           }
         } catch (error: any) {
+          // Remove from pending queue on error
+          const index = this.pendingMessages.indexOf(pendingMessage);
+          if (index > -1) {
+            this.pendingMessages.splice(index, 1);
+          }
+          
           clearTimeout(responseTimeout);
           console.error('❌ Error handling send_message response:', error);
           // Resolve optimistically instead of rejecting
@@ -689,10 +732,77 @@ class ChatService {
           resolve(optimisticMessage);
         }
       });
+      
+      // Check if socket disconnected right after emit
+      setTimeout(() => {
+        if (!this.socket?.connected || this.socket?.id !== socketId) {
+          console.warn('⚠️ Socket disconnected right after emit, message may not have been sent');
+          // Don't remove from pending - let timeout handle it or retry when reconnected
+        }
+      }, 100);
     } catch (error: any) {
       console.error('❌ Error emitting send_message:', error);
       clearTimeout(responseTimeout);
+      
+      // Remove from pending queue on error
+      const index = this.pendingMessages.findIndex(p => p.resolve === resolve);
+      if (index > -1) {
+        this.pendingMessages.splice(index, 1);
+      }
+      
       resolve(optimisticMessage);
+    }
+  }
+
+  private async retryPendingMessages(): Promise<void> {
+    if (this.pendingMessages.length === 0) {
+      return;
+    }
+
+    console.log(`🔄 Retrying ${this.pendingMessages.length} pending messages...`);
+    
+    // Filter out messages that have exceeded max retries
+    const messagesToRetry = this.pendingMessages.filter(p => p.retries < 3);
+    const messagesToRemove = this.pendingMessages.filter(p => p.retries >= 3);
+    
+    // Remove messages that exceeded retries
+    messagesToRemove.forEach(pending => {
+      clearTimeout(pending.timeout);
+      const index = this.pendingMessages.indexOf(pending);
+      if (index > -1) {
+        this.pendingMessages.splice(index, 1);
+      }
+      console.warn(`⚠️ Message exceeded max retries, using optimistic message`);
+      pending.resolve(pending.optimisticMessage);
+    });
+    
+    // Retry remaining messages
+    for (const pending of messagesToRetry) {
+      pending.retries++;
+      clearTimeout(pending.timeout);
+      
+      // Wait a bit before retrying
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      if (this.socket?.connected && this.isAuthenticated && this.connectionStable && this.socket?.id) {
+        console.log(`🔄 Retrying message (attempt ${pending.retries})...`);
+        this.sendMessageToServer(
+          pending.messageData,
+          pending.optimisticMessage,
+          pending.resolve,
+          setTimeout(() => {
+            // Timeout handler - remove from queue and resolve optimistically
+            const index = this.pendingMessages.indexOf(pending);
+            if (index > -1) {
+              this.pendingMessages.splice(index, 1);
+            }
+            console.warn(`⏱️ Retry timeout, using optimistic message`);
+            pending.resolve(pending.optimisticMessage);
+          }, 20000)
+        );
+      } else {
+        console.warn(`⚠️ Cannot retry - socket not ready`);
+      }
     }
   }
 
