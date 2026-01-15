@@ -7,8 +7,18 @@ import {deviceService} from './DeviceService';
 import {messageStorageService} from './MessageStorageService';
 import axios from 'axios';
 
-// Backend API URL - Using Render production URL
-const API_BASE_URL = 'https://communication-vault.onrender.com';
+// Backend API URL helper - Socket.io doesn't use /api path
+const getApiBaseUrl = () => {
+  if (__DEV__) {
+    // Android: Use computer's IP for physical device, 10.0.2.2 for emulator
+    if (Platform.OS === 'android') {
+      return 'http://192.168.1.16:5001';
+    }
+    // iOS simulator and web can use localhost
+    return 'http://localhost:5001';
+  }
+  return 'https://communication-vault.onrender.com';
+};
 
 class ChatService {
   private socket: Socket | null = null;
@@ -36,8 +46,8 @@ class ChatService {
     return new Promise((resolve, reject) => {
       // Get device info for authentication
       deviceService.getDeviceInfo().then(deviceInfo => {
-        // Always use Render production URL
-        const apiUrl = 'https://communication-vault.onrender.com';
+        // Get API URL based on environment
+        const apiUrl = getApiBaseUrl();
 
         console.log(`🔌 Connecting to chat server: ${apiUrl}`);
 
@@ -555,12 +565,6 @@ class ChatService {
         this.connect().catch(err => console.warn('Background connection failed:', err));
       }
 
-      // Use HTTP API for creating chat (more reliable)
-      const apiUrl = __DEV__ && Platform.OS === 'android'
-        ? 'http://192.168.1.16:5001'
-        : (__DEV__ ? 'http://localhost:5001' : 'https://communication-vault.onrender.com');
-
-      // For now, we'll create chat via socket or handle it in the component
       // The backend will create chat automatically when first message is sent
       resolve({
         id: params.userId ? `chat_${params.userId}` : `chat_${params.phoneNumber}`,
