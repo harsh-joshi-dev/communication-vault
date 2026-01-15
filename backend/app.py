@@ -44,40 +44,72 @@ def init_mongodb():
             
             # Validate URI format
             if not uri or not uri.startswith('mongodb'):
-                print(f"Invalid MongoDB URI format: {uri}")
+                print(f"❌ Invalid MongoDB URI format: {uri}")
                 return False
             
-            # Try connecting with mongoengine (lazy connection)
+            # Extract database name
+            db_name = Config.MONGODB_DB_NAME
+            
+            # Ensure database name is in the URI
+            # Check if URI already has database name
+            uri_with_db = uri
+            if '@' in uri:
+                after_at = uri.split('@')[1]
+                if '/' not in after_at.split('?')[0]:
+                    # No database name in URI, add it
+                    if '?' in uri:
+                        uri_with_db = uri.split('?')[0] + '/' + db_name + '?' + uri.split('?')[1]
+                    else:
+                        uri_with_db = uri + '/' + db_name
+            
+            # Connect using mongoengine
+            # Use the URI directly as host parameter
             connect(
-                db=Config.MONGODB_DB_NAME,
-                host=uri,
+                db=db_name,
+                host=uri_with_db,
                 alias='default',
                 connect=False,  # Lazy connection - connect on first use
-                serverSelectionTimeoutMS=10000,
-                connectTimeoutMS=10000,
-                socketTimeoutMS=10000,
             )
-            print(f"✅ MongoDB connection initialized for database: {Config.MONGODB_DB_NAME}")
+            print(f"✅ MongoDB connection initialized for database: {db_name}")
             print(f"   URI: {uri.split('@')[1] if '@' in uri else 'hidden'}")
             return True
         except Exception as e:
             retry_count += 1
             error_msg = str(e)
-            print(f"❌ MongoDB connection attempt {retry_count}/{max_retries} failed: {error_msg}")
+            import traceback
+            print(f"❌ MongoDB connection attempt {retry_count}/{max_retries} failed")
+            print(f"   Error: {error_msg}")
+            print(f"   Traceback: {traceback.format_exc()}")
             
-            # Check if it's a DNS error
-            if 'DNS query name does not exist' in error_msg or 'does not exist' in error_msg:
+            # Check for specific error types
+            if 'super(type, obj)' in error_msg or 'must be an instance' in error_msg:
+                print("   ⚠️  Type Error: This might be a MongoDB driver version issue.")
+                print("   💡 Solutions:")
+                print("      1. Check MongoDB Atlas cluster status (might be paused)")
+                print("      2. Verify connection string format")
+                print("      3. Ensure IP whitelist includes 0.0.0.0/0 (for Render)")
+                print("      4. Try updating pymongo: pip install --upgrade pymongo mongoengine")
+            elif 'DNS query name does not exist' in error_msg or 'does not exist' in error_msg:
                 print("   ⚠️  DNS Error: The MongoDB cluster may not exist or is paused.")
                 print("   💡 Solutions:")
                 print("      1. Verify cluster exists in MongoDB Atlas")
                 print("      2. Check if cluster is paused (free tier) - click 'Resume'")
                 print("      3. Get correct connection string from Atlas 'Connect' button")
                 print("      4. Verify cluster name matches in connection string")
+            elif 'authentication failed' in error_msg.lower():
+                print("   ⚠️  Authentication Error: Check username/password in connection string")
+            elif 'timeout' in error_msg.lower():
+                print("   ⚠️  Timeout Error: Check network connectivity and IP whitelist")
             
             if retry_count >= max_retries:
                 print(f"\n❌ MongoDB connection failed after {max_retries} attempts")
                 print("   App will continue but MongoDB operations will fail.")
                 print("   Please check your MONGODB_URI in Render environment variables.")
+                print("\n   🔧 Quick Fixes:")
+                print("   1. Go to MongoDB Atlas → Your Cluster → Connect")
+                print("   2. Check if cluster is paused → Click 'Resume' if needed")
+                print("   3. Network Access → Add IP Address → Add 0.0.0.0/0 (allow all)")
+                print("   4. Database Access → Verify user credentials")
                 return False
             import time
             time.sleep(3)  # Wait before retry
