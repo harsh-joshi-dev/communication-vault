@@ -7,16 +7,10 @@ import {deviceService} from './DeviceService';
 import {messageStorageService} from './MessageStorageService';
 import axios from 'axios';
 
-// Backend API URL helper - Socket.io doesn't use /api path
+// Backend API URL helper - Always use production URL for Socket.io
+// This ensures consistent connection across all devices (emulator, physical device, etc.)
 const getApiBaseUrl = () => {
-  if (__DEV__) {
-    // Android: Use computer's IP for physical device, 10.0.2.2 for emulator
-    if (Platform.OS === 'android') {
-      return 'http://192.168.1.16:5001';
-    }
-    // iOS simulator and web can use localhost
-    return 'http://localhost:5001';
-  }
+  // Always use production URL - no local development URLs
   return 'https://communication-vault.onrender.com';
 };
 
