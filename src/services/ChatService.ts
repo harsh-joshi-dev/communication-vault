@@ -58,7 +58,7 @@ class ChatService {
 
         this.isAuthenticated = false;
 
-        // Create socket with simpler configuration
+        // Create socket with configuration optimized for Render cold starts
         this.socket = io(apiUrl, {
           auth: {
             deviceId: deviceInfo.deviceId,
@@ -67,11 +67,11 @@ class ChatService {
           },
           transports: ['polling', 'websocket'],
           reconnection: true,
-          reconnectionAttempts: 5,
-          reconnectionDelay: 1000,
-          reconnectionDelayMax: 5000,
-          timeout: 20000,
-          // Remove forceNew - let socket.io manage connections naturally
+          reconnectionAttempts: Infinity, // Keep trying forever
+          reconnectionDelay: 2000,
+          reconnectionDelayMax: 10000,
+          timeout: 60000, // 60 seconds for Render cold starts
+          forceNew: false, // Reuse connection if possible
         });
 
         let authReceived = false;
@@ -87,6 +87,22 @@ class ChatService {
           this.isAuthenticated = true;
           authReceived = true;
           
+          // Join device room and unique code room for receiving messages
+          if (this.socket?.connected) {
+            const deviceId = data.deviceId || deviceInfo.deviceId;
+            const uniqueCode = data.uniqueCode || deviceInfo.uniqueCode;
+            
+            // Join device room (for direct messages)
+            this.socket.emit('join_chat', {chatId: `device_${deviceId}`});
+            
+            // Join unique code room (for messages by code)
+            if (uniqueCode) {
+              this.socket.emit('join_chat', {chatId: `code_${uniqueCode}`});
+            }
+            
+            console.log('✅ Joined device and code rooms for receiving messages');
+          }
+          
           if (this.connectionPromise) {
             this.connectionPromise = null;
           }
@@ -98,14 +114,15 @@ class ChatService {
           console.error('❌ Connection error:', error.message);
           this.isAuthenticated = false;
           
-          // Only reject if we haven't received auth yet
+          // Don't reject immediately - let reconnection handle it
+          // Only reject after a very long timeout (for Render cold starts)
           if (!authReceived) {
             setTimeout(() => {
-              if (!this.isAuthenticated && !authReceived) {
-                this.connectionPromise = null;
-                reject(error);
+              if (!this.isAuthenticated && !authReceived && this.connectionPromise) {
+                // Still trying to connect, don't reject yet
+                console.log('⏳ Still attempting to connect...');
               }
-            }, 5000);
+            }, 10000);
           }
         });
 
@@ -123,14 +140,16 @@ class ChatService {
         // Set up event listeners
         this.setupEventListeners();
 
-        // Timeout after 30 seconds if no auth
+        // Timeout after 90 seconds if no auth (for Render cold starts)
         setTimeout(() => {
-          if (!this.isAuthenticated && !authReceived) {
-            console.error('❌ Authentication timeout');
+          if (!this.isAuthenticated && !authReceived && this.connectionPromise) {
+            console.error('❌ Authentication timeout after 90 seconds');
+            // Don't reject - let it keep trying in background
+            // Just resolve so app can continue
             this.connectionPromise = null;
-            reject(new Error('Authentication timeout'));
+            resolve(); // Resolve anyway so app doesn't hang
           }
-        }, 30000);
+        }, 90000);
 
       } catch (error: any) {
         this.connectionPromise = null;
