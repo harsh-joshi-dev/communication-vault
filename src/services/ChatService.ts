@@ -32,9 +32,21 @@ class ChatService {
   }
 
   async connect(): Promise<void> {
+    // Verify socket is actually connected and authenticated before returning early
     if (this.socket?.connected && this.isAuthenticated) {
-      console.log('✅ Socket already connected and authenticated');
-      return Promise.resolve();
+      // Double-check by verifying socket state
+      if (this.socket.id) {
+        console.log('✅ Socket already connected and authenticated');
+        return Promise.resolve();
+      } else {
+        // Socket says connected but no ID - reset and reconnect
+        console.warn('⚠️ Socket state inconsistent, reconnecting...');
+        this.isAuthenticated = false;
+        if (this.socket) {
+          this.socket.disconnect();
+          this.socket = null;
+        }
+      }
     }
 
     return new Promise((resolve, reject) => {
@@ -65,9 +77,9 @@ class ChatService {
           transports: ['polling', 'websocket'], // Try polling first, then upgrade to websocket
           reconnection: true,
           reconnectionAttempts: Infinity, // Keep trying forever
-          reconnectionDelay: 1000,
-          reconnectionDelayMax: 5000,
-          timeout: 20000,
+          reconnectionDelay: 2000, // Increased for Render cold starts
+          reconnectionDelayMax: 10000, // Increased max delay
+          timeout: 60000, // Increased to 60 seconds for Render cold starts
           forceNew: true, // Force new connection
           upgrade: true, // Allow upgrade from polling to websocket
           rememberUpgrade: false,
@@ -80,24 +92,24 @@ class ChatService {
         // Set up connection timeout (longer for Render cold starts)
         connectionTimeout = setTimeout(() => {
           if (!this.socket?.connected && !resolved) {
-            console.error('❌ Connection timeout after 30 seconds');
+            console.error('❌ Connection timeout after 60 seconds');
             if (!resolved) {
               resolved = true;
               reject(new Error('Connection timeout'));
             }
           }
-        }, 30000); // 30 seconds timeout
+        }, 60000); // 60 seconds timeout for Render cold starts
 
         // Set up authentication timeout - CRITICAL: Don't resolve if not authenticated
         authTimeout = setTimeout(() => {
           if (!this.isAuthenticated && !resolved) {
-            console.error('❌ Authentication timeout after 15 seconds');
+            console.error('❌ Authentication timeout after 30 seconds');
             if (!resolved) {
               resolved = true;
               reject(new Error('Authentication timeout'));
             }
           }
-        }, 15000); // 15 seconds for auth (increased from 10)
+        }, 30000); // 30 seconds for auth (increased for Render cold starts)
 
         this.socket.on('connect', () => {
           console.log('✅ Socket connected, waiting for authentication...');
@@ -108,7 +120,18 @@ class ChatService {
         this.socket.on('connect_error', (error: any) => {
           console.error('❌ Connection error:', error.message);
           this.isAuthenticated = false;
-          if (!resolved) {
+          // Don't reject immediately - let reconnection handle it
+          // Only reject if it's a critical error
+          if (error.message.includes('timeout') && !resolved) {
+            // For timeout errors, wait a bit longer before rejecting
+            setTimeout(() => {
+              if (!this.socket?.connected && !resolved) {
+                resolved = true;
+                reject(error);
+              }
+            }, 5000);
+          } else if (!error.message.includes('timeout') && !resolved) {
+            // For non-timeout errors, reject immediately
             resolved = true;
             reject(error);
           }
@@ -451,11 +474,11 @@ class ChatService {
         console.error('Error storing message locally:', err)
       );
 
-      // Set up response timeout
+      // Set up response timeout (longer for Render cold starts)
       const responseTimeout = setTimeout(() => {
-        console.warn('⏱️ No response from server after 10 seconds, using optimistic message');
+        console.warn('⏱️ No response from server after 20 seconds, using optimistic message');
         resolve(message); // Resolve optimistically
-      }, 10000); // 10 second timeout
+      }, 20000); // 20 second timeout for Render cold starts
 
       // If socket is not initialized, not connected, or not authenticated, try to connect first
       if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
