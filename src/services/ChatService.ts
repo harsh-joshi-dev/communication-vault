@@ -140,28 +140,50 @@ class ChatService {
         this.socket.on('disconnect', (reason) => {
           console.log('⚠️ Chat disconnected:', reason);
           this.isAuthenticated = false;
+          
+          // Handle different disconnect reasons
           if (reason === 'io server disconnect') {
             // Server disconnected, reconnect manually
+            console.log('🔄 Server disconnected, attempting to reconnect...');
             this.socket?.connect();
+          } else if (reason === 'transport error' || reason === 'transport close') {
+            // Transport error - socket.io will auto-reconnect, but reset auth state
+            console.log('🔄 Transport error, will auto-reconnect...');
+            this.isAuthenticated = false;
+          } else if (reason === 'ping timeout') {
+            // Ping timeout - connection lost
+            console.log('🔄 Ping timeout, will reconnect...');
+            this.isAuthenticated = false;
           }
         });
 
         // CRITICAL: Wait for server authentication confirmation
         this.socket.on('connected', (data) => {
           console.log('✅ Connection confirmed by server (authenticated):', data);
-          this.isAuthenticated = true;
           
-          if (connectionTimeout) {
-            clearTimeout(connectionTimeout);
-          }
-          if (authTimeout) {
-            clearTimeout(authTimeout);
-          }
-          
-          if (!resolved) {
-            resolved = true;
-            resolve();
-          }
+          // Wait a moment to ensure connection is stable before marking as authenticated
+          setTimeout(() => {
+            // Double-check socket is still connected before marking as authenticated
+            if (this.socket?.connected && this.socket?.id) {
+              this.isAuthenticated = true;
+              console.log('✅ Socket authenticated and stable');
+              
+              if (connectionTimeout) {
+                clearTimeout(connectionTimeout);
+              }
+              if (authTimeout) {
+                clearTimeout(authTimeout);
+              }
+              
+              if (!resolved) {
+                resolved = true;
+                resolve();
+              }
+            } else {
+              console.warn('⚠️ Socket disconnected before authentication completed');
+              this.isAuthenticated = false;
+            }
+          }, 500); // Wait 500ms to ensure connection is stable
         });
 
         // Set up event listeners
@@ -516,15 +538,36 @@ class ChatService {
     resolve: (message: Message) => void,
     responseTimeout: NodeJS.Timeout
   ) {
+    // Double-check socket state right before sending
+    if (!this.socket) {
+      console.error('❌ Cannot send message: socket does not exist');
+      resolve(optimisticMessage);
+      return;
+    }
+
     // Verify socket is actually connected and has an ID
-    if (!this.socket || !this.socket.connected || !this.isAuthenticated || !this.socket.id) {
-      console.error('❌ Cannot send message: socket not authenticated or no socket ID');
+    if (!this.socket.connected || !this.isAuthenticated || !this.socket.id) {
+      console.error('❌ Cannot send message: socket not connected/authenticated');
       console.log('Socket state:', {
         exists: !!this.socket,
         connected: this.socket?.connected,
         authenticated: this.isAuthenticated,
         socketId: this.socket?.id,
       });
+      
+      // Try to reconnect if socket exists but not connected
+      if (this.socket && !this.socket.connected) {
+        console.log('🔄 Attempting to reconnect before sending...');
+        this.connect().catch(err => console.error('Reconnection failed:', err));
+      }
+      
+      resolve(optimisticMessage);
+      return;
+    }
+
+    // Final check - verify socket is still connected right before emit
+    if (!this.socket.connected || !this.socket.id) {
+      console.error('❌ Socket disconnected between checks');
       resolve(optimisticMessage);
       return;
     }
@@ -536,53 +579,75 @@ class ChatService {
       type: messageData.type,
       contentLength: messageData.content?.length || 0,
       socketId: this.socket.id,
+      connected: this.socket.connected,
     });
 
-    this.socket.emit('send_message', messageData, async (response: any) => {
-      try {
-        clearTimeout(responseTimeout);
-        console.log('📥 Received response from server:', response);
-        
-        // Handle undefined or null response
-        if (!response) {
-          console.warn('⚠️ No response from server, using optimistic message');
-          resolve(optimisticMessage);
-          return;
-        }
+    // Add error handler for the emit itself
+    const emitErrorHandler = (error: any) => {
+      console.error('❌ Error emitting send_message:', error);
+      clearTimeout(responseTimeout);
+      resolve(optimisticMessage);
+    };
 
-        if (response.error) {
-          console.error('❌ Server error:', response.error);
-          // For all errors, resolve optimistically (message is saved locally)
-          console.warn('⚠️ Server error but keeping message locally:', response.error);
-          resolve(optimisticMessage);
-        } else if (response.message) {
-          console.log('✅ Message sent successfully:', response.message.id);
-          // Update local storage with server response (includes server ID, timestamps, etc.)
-          const serverMessage = response.message;
-          await messageStorageService.saveMessage(serverMessage);
-          
-          // Also update chat with the sent message
-          try {
-            const {chatStorageService} = await import('./ChatStorageService');
-            await chatStorageService.updateChatWithMessage(optimisticMessage.chatId, serverMessage);
-          } catch (err) {
-            console.error('Error updating chat:', err);
-          }
-          
-          resolve(serverMessage);
-        } else {
-          // If no error and no message, assume success and use the optimistic message
-          console.warn('⚠️ Server response missing message field, using optimistic message');
-          resolve(optimisticMessage);
-        }
-      } catch (error: any) {
+    try {
+      // Check one more time right before emit
+      if (!this.socket.connected || !this.socket.id) {
+        console.error('❌ Socket disconnected right before emit');
         clearTimeout(responseTimeout);
-        console.error('❌ Error handling send_message response:', error);
-        // Resolve optimistically instead of rejecting
-        console.warn('⚠️ Resolving optimistically due to error');
         resolve(optimisticMessage);
+        return;
       }
-    });
+
+      this.socket.emit('send_message', messageData, async (response: any) => {
+        try {
+          clearTimeout(responseTimeout);
+          console.log('📥 Received response from server:', response);
+        
+          // Handle undefined or null response
+          if (!response) {
+            console.warn('⚠️ No response from server, using optimistic message');
+            resolve(optimisticMessage);
+            return;
+          }
+
+          if (response.error) {
+            console.error('❌ Server error:', response.error);
+            // For all errors, resolve optimistically (message is saved locally)
+            console.warn('⚠️ Server error but keeping message locally:', response.error);
+            resolve(optimisticMessage);
+          } else if (response.message) {
+            console.log('✅ Message sent successfully:', response.message.id);
+            // Update local storage with server response (includes server ID, timestamps, etc.)
+            const serverMessage = response.message;
+            await messageStorageService.saveMessage(serverMessage);
+            
+            // Also update chat with the sent message
+            try {
+              const {chatStorageService} = await import('./ChatStorageService');
+              await chatStorageService.updateChatWithMessage(optimisticMessage.chatId, serverMessage);
+            } catch (err) {
+              console.error('Error updating chat:', err);
+            }
+            
+            resolve(serverMessage);
+          } else {
+            // If no error and no message, assume success and use the optimistic message
+            console.warn('⚠️ Server response missing message field, using optimistic message');
+            resolve(optimisticMessage);
+          }
+        } catch (error: any) {
+          clearTimeout(responseTimeout);
+          console.error('❌ Error handling send_message response:', error);
+          // Resolve optimistically instead of rejecting
+          console.warn('⚠️ Resolving optimistically due to error');
+          resolve(optimisticMessage);
+        }
+      });
+    } catch (error: any) {
+      console.error('❌ Error emitting send_message:', error);
+      clearTimeout(responseTimeout);
+      resolve(optimisticMessage);
+    }
   }
 
   async createChat(params: {
