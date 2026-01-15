@@ -7,6 +7,10 @@ from flask_jwt_extended import decode_token
 from models_mongo import User, Chat, Message
 from datetime import datetime
 
+# Global dictionary to store device_id by socket session ID
+# This is more reliable than request attributes which may not persist
+device_sessions = {}
+
 def register_socket_handlers(socketio_instance):
     """Register all Socket.io event handlers"""
     global socketio
@@ -16,7 +20,10 @@ def register_socket_handlers(socketio_instance):
     def handle_connect(auth):
         """Handle client connection with device-based authentication"""
         try:
+            from flask import request
+            
             if not auth:
+                print("❌ Connection rejected: No auth data provided")
                 return False
             
             # Get device info from auth (deviceId, uniqueCode, deviceName)
@@ -25,11 +32,18 @@ def register_socket_handlers(socketio_instance):
             device_name = auth.get('deviceName', 'Unknown Device')
             
             if not device_id:
-                print("Connection rejected: Missing deviceId")
+                print("❌ Connection rejected: Missing deviceId")
                 return False
             
-            # Store device_id in session
-            from flask import request
+            # Store device_id in global dictionary using socket session ID
+            # This is more reliable than request attributes
+            device_sessions[request.sid] = {
+                'device_id': device_id,
+                'unique_code': unique_code,
+                'device_name': device_name
+            }
+            
+            # Also store in request for backward compatibility
             request.sid_device_id = device_id
             request.sid_unique_code = unique_code
             request.sid_device_name = device_name
@@ -46,11 +60,13 @@ def register_socket_handlers(socketio_instance):
                 'uniqueCode': unique_code,
                 'deviceName': device_name
             })
-            print(f"Device {device_id} ({device_name}) connected with code {unique_code}")
+            print(f"✅ Device {device_id} ({device_name}) connected with code {unique_code}, Socket ID: {request.sid}")
             return True
             
         except Exception as e:
-            print(f"Connection error: {e}")
+            print(f"❌ Connection error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     @socketio_instance.on('disconnect')
@@ -58,14 +74,21 @@ def register_socket_handlers(socketio_instance):
         """Handle client disconnection"""
         try:
             from flask import request
-            device_id = getattr(request, 'sid_device_id', None)
-            unique_code = getattr(request, 'sid_unique_code', None)
+            
+            # Get device_id from global dictionary
+            session_data = device_sessions.get(request.sid, {})
+            device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
+            unique_code = session_data.get('unique_code') or getattr(request, 'sid_unique_code', None)
+            
+            # Remove from global dictionary
+            if request.sid in device_sessions:
+                del device_sessions[request.sid]
             
             if device_id:
                 leave_room(f'device_{device_id}')
                 if unique_code:
                     leave_room(f'code_{unique_code}')
-                print(f"Device {device_id} disconnected")
+                print(f"⚠️ Device {device_id} disconnected, Socket ID: {request.sid}")
         except Exception as e:
             print(f"Disconnect error: {e}")
     
@@ -74,7 +97,8 @@ def register_socket_handlers(socketio_instance):
         """Join a chat room"""
         try:
             from flask import request
-            device_id = getattr(request, 'sid_device_id', None)
+            session_data = device_sessions.get(request.sid, {})
+            device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
             chat_id = data.get('chatId')
             
             if not device_id or not chat_id:
@@ -94,7 +118,8 @@ def register_socket_handlers(socketio_instance):
         """Leave a chat room"""
         try:
             from flask import request
-            device_id = getattr(request, 'sid_device_id', None)
+            session_data = device_sessions.get(request.sid, {})
+            device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
             chat_id = data.get('chatId')
             
             if not device_id or not chat_id:
@@ -111,13 +136,19 @@ def register_socket_handlers(socketio_instance):
         """Handle real-time message sending"""
         try:
             from flask import request
-            device_id = getattr(request, 'sid_device_id', None)
-            device_name = getattr(request, 'sid_device_name', 'Unknown Device')
+            
+            # Get device_id from global dictionary first, then fallback to request
+            session_data = device_sessions.get(request.sid, {})
+            device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
+            device_name = session_data.get('device_name') or getattr(request, 'sid_device_name', 'Unknown Device')
             
             if not device_id:
-                print(f"❌ Send message failed: device_id not found in session. Socket ID: {request.sid}")
-                print(f"   Available attributes: {[attr for attr in dir(request) if not attr.startswith('_')]}")
+                print(f"❌ Send message failed: device_id not found. Socket ID: {request.sid}")
+                print(f"   Session data: {device_sessions.get(request.sid, 'Not found')}")
+                print(f"   Available sessions: {list(device_sessions.keys())}")
                 return {'error': 'Not authenticated'}
+            
+            print(f"📤 Processing message from device {device_id} (Socket: {request.sid})")
             
             chat_id = data.get('chatId')
             message_type = data.get('type', 'text')
@@ -298,8 +329,9 @@ def register_socket_handlers(socketio_instance):
         """Handle typing indicator"""
         try:
             from flask import request
-            device_id = getattr(request, 'sid_device_id', None)
-            device_name = getattr(request, 'sid_device_name', 'Unknown Device')
+            session_data = device_sessions.get(request.sid, {})
+            device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
+            device_name = session_data.get('device_name') or getattr(request, 'sid_device_name', 'Unknown Device')
             chat_id = data.get('chatId')
             is_typing = data.get('isTyping', False)
             
@@ -327,11 +359,15 @@ def register_socket_handlers(socketio_instance):
         """Mark messages as read"""
         try:
             from flask import request
-            device_id = getattr(request, 'sid_device_id', None)
+            
+            # Get device_id from global dictionary first, then fallback to request
+            session_data = device_sessions.get(request.sid, {})
+            device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
             chat_id = data.get('chatId')
             message_ids = data.get('messageIds', [])
             
             if not device_id or not chat_id:
+                print(f"⚠️ Mark read failed: device_id={device_id}, chat_id={chat_id}")
                 return
             
             # Verify device is part of chat
@@ -373,7 +409,8 @@ def register_socket_handlers(socketio_instance):
         """Delete a message (mark as deleted)"""
         try:
             from flask import request
-            device_id = getattr(request, 'sid_device_id', None)
+            session_data = device_sessions.get(request.sid, {})
+            device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
             chat_id = data.get('chatId')
             message_id = data.get('messageId')
             

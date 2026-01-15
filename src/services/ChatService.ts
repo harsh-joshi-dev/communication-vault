@@ -438,6 +438,12 @@ class ChatService {
       // If socket is not initialized, not connected, or not authenticated, resolve optimistically
       if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
         console.warn('⚠️ Socket not available/authenticated, message saved locally and will sync when connected');
+        console.log('Socket state:', {
+          exists: !!this.socket,
+          connected: this.socket?.connected,
+          authenticated: this.isAuthenticated,
+        });
+        
         // Try to initialize socket in background if not initialized
         if (!this.socket) {
           this.connect().catch(err => console.warn('Background connection failed:', err));
@@ -445,6 +451,8 @@ class ChatService {
           // Socket exists but not connected/authenticated, try to reconnect
           this.connect().catch(err => console.warn('Background reconnection failed:', err));
         }
+        
+        // Resolve optimistically - message is saved locally
         resolve(message);
         return;
       }
@@ -593,30 +601,16 @@ class ChatService {
   }
 
   async markAsRead(chatId: string, messageIds: string[]): Promise<void> {
-    if (!this.socket?.connected) return;
-
-    this.socket.emit('mark_read', {chatId, messageIds});
-    
-    // Also call HTTP API as backup
-    try {
-      const EncryptedStorage = require('react-native-encrypted-storage').default;
-      const token = await EncryptedStorage.getItem('access_token');
-      
-      const apiUrl = __DEV__ && Platform.OS === 'android'
-        ? 'http://192.168.1.16:5001/api'
-        : (__DEV__ ? 'http://localhost:5001/api' : 'https://communication-vault.onrender.com/api');
-
-      await axios.get(
-        `${apiUrl}/messages/chats/${chatId}/messages`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
-      );
-    } catch (error) {
-      console.error('Error marking messages as read:', error);
+    // Use socket.io for marking as read (more reliable)
+    if (this.socket?.connected && this.isAuthenticated) {
+      console.log('📖 Marking messages as read via socket:', {chatId, messageIds});
+      this.socket.emit('mark_read', {chatId, messageIds});
+    } else {
+      console.warn('⚠️ Socket not connected/authenticated, skipping mark as read');
     }
+    
+    // HTTP API backup is not needed since socket handles it
+    // The HTTP endpoint requires JWT token which may not be available
   }
 
 }
