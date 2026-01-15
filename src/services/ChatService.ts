@@ -404,12 +404,7 @@ class ChatService {
       messageData.receiverUniqueCode = options.receiverUniqueCode;
     }
 
-    return new Promise((resolve, reject) => {
-      if (!this.socket) {
-        reject(new Error('Socket not initialized'));
-        return;
-      }
-
+    return new Promise((resolve) => {
       // Store message locally immediately (optimistic update)
       messageStorageService.saveMessage(message).catch(err => 
         console.error('Error storing message locally:', err)
@@ -421,6 +416,9 @@ class ChatService {
         // Try to initialize socket in background if not initialized
         if (!this.socket) {
           this.connect().catch(err => console.warn('Background connection failed:', err));
+        } else {
+          // Socket exists but not connected, try to reconnect
+          this.connect().catch(err => console.warn('Background reconnection failed:', err));
         }
         resolve(message);
         return;
