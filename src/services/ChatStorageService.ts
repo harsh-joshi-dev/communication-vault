@@ -47,13 +47,13 @@ class ChatStorageService {
         return existingChat;
       }
 
-      // Create new chat
+      // Create new chat - use "Unknown User" as default name
       const newChat: Chat = {
         id: `chat_${deviceId}`,
         participantIds: [deviceId],
         otherUser: {
           id: deviceId,
-          name: deviceName,
+          name: 'Unknown User', // Default name until user edits it
           uniqueCode: uniqueCode,
           isAppUser: true,
         },
@@ -137,7 +137,7 @@ class ChatStorageService {
         if (message.senderId !== currentDeviceId) {
           const senderDeviceId = message.senderId;
           const senderUniqueCode = senderDeviceId.substring(0, 8).toUpperCase();
-          const senderName = `Device ${senderUniqueCode}`;
+          const senderName = 'Unknown User'; // Default name until user edits it
           
           const newChat = await this.getOrCreateChat(
             senderDeviceId,

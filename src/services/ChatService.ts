@@ -269,22 +269,30 @@ class ChatService {
       duration?: number;
     },
   ): Promise<Message> {
-    // Ensure connection before sending
+    // CRITICAL: Ensure connection before sending
     if (!this.socket?.connected) {
-      console.log('Socket not connected, attempting to connect...');
+      console.log('⚠️ Socket not connected, attempting to connect...');
       try {
         await this.connect();
-        // Wait a bit for connection to fully establish
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // Wait for connection to fully establish
+        let retries = 0;
+        while (!this.socket?.connected && retries < 10) {
+          await new Promise(resolve => setTimeout(resolve, 200));
+          retries++;
+        }
+        
+        if (!this.socket?.connected) {
+          throw new Error('Connection timeout - socket not connected after retries');
+        }
       } catch (error: any) {
-        console.error('Connection error:', error);
+        console.error('❌ Connection error:', error);
         throw new Error(`Failed to connect: ${error.message}`);
       }
     }
 
     // Double check connection status
     if (!this.socket || !this.socket.connected) {
-      console.error('Socket still not connected after connect attempt');
+      console.error('❌ Socket still not connected after connect attempt');
       console.log('Socket state:', {
         exists: !!this.socket,
         connected: this.socket?.connected,
@@ -293,7 +301,7 @@ class ChatService {
       throw new Error('Not connected to chat server. Please check your internet connection and try again.');
     }
 
-    console.log('Socket connected, sending message...');
+    console.log('✅ Socket connected, sending message...');
 
     // Upload media file if provided
     let mediaUrl: string | undefined;

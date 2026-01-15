@@ -66,7 +66,7 @@ const ChatsScreen: React.FC = () => {
       ? format(new Date(item.lastMessage.createdAt), 'HH:mm')
       : '';
     
-    const contactName = item.otherUser?.name || 'Unknown Device';
+    const contactName = item.otherUser?.name || 'Unknown User';
     const contactAvatar = item.otherUser?.avatar;
 
     return (

@@ -72,16 +72,17 @@ const QRScannerScreen: React.FC = () => {
       const {chatStorageService} = await import('../../services/ChatStorageService');
       
       // Create or get chat (like WhatsApp - directly creates chat, not contact)
+      // Use "Unknown User" as default name until user edits it
       const chat = await chatStorageService.getOrCreateChat(
         data.deviceId,
-        data.deviceName || `Device ${data.uniqueCode}`,
+        'Unknown User', // Default name
         data.uniqueCode
       );
 
       // Navigate directly to chat screen (like WhatsApp)
       (navigation as any).navigate('ChatDetail', {
         chatId: chat.id,
-        contactName: data.deviceName || `Device ${data.uniqueCode}`,
+        contactName: 'Unknown User', // Default name
         receiverId: data.deviceId,
         receiverUniqueCode: data.uniqueCode,
         isAppUser: true,
