@@ -151,7 +151,7 @@ class ChatService {
           id: messageData.id || messageData._id || uuidv4(),
           chatId: messageData.chatId || messageData.chat_id,
           senderId: messageData.senderId || messageData.sender_id,
-          receiverId: messageData.receiverId || messageData.receiver_id,
+          receiverId: messageData.receiverId || messageData.receiver_id || '',
           type: messageData.type || 'text',
           content: messageData.content || '',
           mediaUrl: messageData.mediaUrl || messageData.media_url,
@@ -161,6 +161,7 @@ class ChatService {
           duration: messageData.duration,
           isViewOnce: messageData.isViewOnce || messageData.is_view_once || false,
           autoDeleteAfter: messageData.autoDeleteAfter || messageData.auto_delete_after,
+          isDeleted: messageData.isDeleted || messageData.is_deleted || false,
           status: messageData.status || 'sent',
           sentAt: messageData.sentAt || messageData.sent_at || new Date().toISOString(),
           deliveredAt: messageData.deliveredAt || messageData.delivered_at,
@@ -303,7 +304,7 @@ class ChatService {
       id: uuidv4(),
       chatId,
       senderId: deviceInfo.deviceId,
-      receiverId,
+      receiverId: receiverId || '',
       type,
       content,
       mediaUrl,
@@ -313,6 +314,7 @@ class ChatService {
       duration: options?.duration,
       isViewOnce: options?.isViewOnce || false,
       autoDeleteAfter: options?.autoDeleteAfter,
+      isDeleted: false,
       status: 'sending',
       sentAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
@@ -327,8 +329,8 @@ class ChatService {
         await this.connect();
       } catch (error) {
         console.warn('⚠️ Could not connect, message saved locally:', error);
-        // Update status to failed but keep message
-        message.status = 'failed';
+        // Update status to pending but keep message
+        message.status = 'pending';
         await messageStorageService.saveMessage(message);
         return message;
       }
@@ -371,8 +373,8 @@ class ChatService {
           
           if (response?.error) {
             console.error('❌ Server error:', response.error);
-            message.status = 'failed';
-            await messageStorageService.saveMessage(message);
+            message.status = 'pending';
+            messageStorageService.saveMessage(message).catch(console.error);
             resolve(message);
             return;
           }
@@ -397,8 +399,8 @@ class ChatService {
       } else {
         clearTimeout(timeout);
         console.warn('⚠️ Socket not connected, message saved locally');
-        message.status = 'failed';
-        await messageStorageService.saveMessage(message);
+        message.status = 'pending';
+        messageStorageService.saveMessage(message).catch(console.error);
         resolve(message);
       }
     });
