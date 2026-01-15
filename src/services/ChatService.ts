@@ -452,14 +452,9 @@ class ChatService {
 
           if (response.error) {
             console.error('❌ Server error:', response.error);
-            // Check for specific error types
-            if (response.error.includes('not registered') || response.error.includes('not invited')) {
-              reject(new Error('User is not registered or invited. Please invite them first.'));
-            } else {
-              // For other errors, still resolve optimistically
-              console.warn('⚠️ Server error but keeping message locally:', response.error);
-              resolve(message);
-            }
+            // For all errors, resolve optimistically (message is saved locally)
+            console.warn('⚠️ Server error but keeping message locally:', response.error);
+            resolve(message);
           } else if (response.message) {
             console.log('✅ Message sent successfully:', response.message.id);
             // Update local storage with server response (includes server ID, timestamps, etc.)
