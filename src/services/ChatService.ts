@@ -583,13 +583,14 @@ class ChatService {
       return;
     }
 
-    // Verify socket is actually connected and has an ID
-    if (!this.socket.connected || !this.isAuthenticated || !this.socket.id) {
-      console.error('❌ Cannot send message: socket not connected/authenticated');
+    // Verify socket is actually connected, authenticated, stable, and has an ID
+    if (!this.socket.connected || !this.isAuthenticated || !this.connectionStable || !this.socket.id) {
+      console.error('❌ Cannot send message: socket not connected/authenticated/stable');
       console.log('Socket state:', {
         exists: !!this.socket,
         connected: this.socket?.connected,
         authenticated: this.isAuthenticated,
+        stable: this.connectionStable,
         socketId: this.socket?.id,
       });
       
@@ -628,9 +629,14 @@ class ChatService {
     };
 
     try {
-      // Check one more time right before emit
-      if (!this.socket.connected || !this.socket.id) {
-        console.error('❌ Socket disconnected right before emit');
+      // Check one more time right before emit - verify stability
+      if (!this.socket.connected || !this.socket.id || !this.connectionStable) {
+        console.error('❌ Socket disconnected or unstable right before emit');
+        console.log('Final check:', {
+          connected: this.socket.connected,
+          socketId: this.socket.id,
+          stable: this.connectionStable,
+        });
         clearTimeout(responseTimeout);
         resolve(optimisticMessage);
         return;
