@@ -103,10 +103,14 @@ const ChatDetailScreen: React.FC = () => {
     };
   }, []);
 
-  const joinChat = () => {
-    const socket = (chatService as any).socketInstance;
-    if (socket?.connected && chatId) {
-      socket.emit('join_chat', {chatId});
+  const joinChat = async () => {
+    if (chatId) {
+      try {
+        await chatService.joinChat(chatId);
+        console.log('✅ Joined chat room:', chatId);
+      } catch (error) {
+        console.error('❌ Failed to join chat room:', error);
+      }
     }
   };
 
