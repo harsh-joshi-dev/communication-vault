@@ -554,6 +554,11 @@ class ChatService {
       // Set up response timeout (longer for Render cold starts)
       const responseTimeout = setTimeout(() => {
         console.warn('⏱️ No response from server after 20 seconds, using optimistic message');
+        // Remove from pending queue if it exists
+        const pendingIndex = this.pendingMessages.findIndex(p => p.resolve === resolve);
+        if (pendingIndex > -1) {
+          this.pendingMessages.splice(pendingIndex, 1);
+        }
         resolve(message); // Resolve optimistically
       }, 20000); // 20 second timeout for Render cold starts
 
