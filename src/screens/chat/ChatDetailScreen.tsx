@@ -237,8 +237,14 @@ const ChatDetailScreen: React.FC = () => {
         requestAnimationFrame(() => scrollToBottom());
         
         // Update chat storage (non-blocking for speed)
-        chatStorageService.updateChatWithMessage(chatId, message).catch(err => 
+        // Don't increment unread count since chat screen is open
+        chatStorageService.updateChatWithMessage(chatId, message, false).catch(err => 
           console.error('Error updating chat:', err)
+        );
+        
+        // Mark messages as read when chat screen is open
+        chatService.markAsRead(chatId, [message.id]).catch(err => 
+          console.error('Error marking as read:', err)
         );
       }
     });

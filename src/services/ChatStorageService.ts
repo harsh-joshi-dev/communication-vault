@@ -106,7 +106,7 @@ class ChatStorageService {
   /**
    * Update chat with last message
    */
-  async updateChatWithMessage(chatId: string, message: Message): Promise<void> {
+  async updateChatWithMessage(chatId: string, message: Message, incrementUnread: boolean = true): Promise<void> {
     try {
       const chats = await this.getChats();
       const currentDeviceId = await this.getCurrentDeviceId();
@@ -126,8 +126,8 @@ class ChatStorageService {
         chats[chatIndex].lastMessage = message;
         chats[chatIndex].updatedAt = new Date().toISOString();
         
-        // Increment unread count if message is from other user
-        if (message.senderId !== currentDeviceId && !message.isDeleted) {
+        // Increment unread count if message is from other user and incrementUnread is true
+        if (message.senderId !== currentDeviceId && !message.isDeleted && incrementUnread) {
           chats[chatIndex].unreadCount = (chats[chatIndex].unreadCount || 0) + 1;
         }
         
@@ -148,7 +148,7 @@ class ChatStorageService {
           // Update with message
           newChat.lastMessage = message;
           newChat.updatedAt = new Date().toISOString();
-          newChat.unreadCount = 1; // First message is unread
+          newChat.unreadCount = incrementUnread ? 1 : 0; // Only increment if incrementUnread is true
           
           const updatedChats = await this.getChats();
           const newChatIndex = updatedChats.findIndex(chat => chat.id === newChat.id);
