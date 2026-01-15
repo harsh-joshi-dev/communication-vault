@@ -278,10 +278,9 @@ const ChatDetailScreen: React.FC = () => {
     scrollToBottom();
 
     // Send message (never throws errors - always succeeds optimistically)
-    const receiver = receiverUniqueCode || receiverId || undefined;
     chatService.sendMessage(
       chatId,
-      receiver,
+      receiverId || undefined,
       'text',
       messageText,
       undefined,
