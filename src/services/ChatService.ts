@@ -33,16 +33,17 @@ class ChatService {
   }
 
   async connect(): Promise<void> {
-    // Verify socket is actually connected and authenticated before returning early
-    if (this.socket?.connected && this.isAuthenticated) {
+    // Verify socket is actually connected, authenticated, and stable before returning early
+    if (this.socket?.connected && this.isAuthenticated && this.connectionStable) {
       // Double-check by verifying socket state
       if (this.socket.id) {
-        console.log('✅ Socket already connected and authenticated');
+        console.log('✅ Socket already connected, authenticated, and stable');
         return Promise.resolve();
       } else {
         // Socket says connected but no ID - reset and reconnect
         console.warn('⚠️ Socket state inconsistent, reconnecting...');
         this.isAuthenticated = false;
+        this.connectionStable = false;
         if (this.socket) {
           this.socket.disconnect();
           this.socket = null;
@@ -58,8 +59,9 @@ class ChatService {
 
         console.log(`🔌 Connecting to chat server: ${apiUrl}`);
 
-        // Reset authentication status
+        // Reset authentication status and stability
         this.isAuthenticated = false;
+        this.connectionStable = false;
 
         // Disconnect existing socket if any
         if (this.socket) {
