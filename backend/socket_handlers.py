@@ -115,6 +115,8 @@ def register_socket_handlers(socketio_instance):
             device_name = getattr(request, 'sid_device_name', 'Unknown Device')
             
             if not device_id:
+                print(f"❌ Send message failed: device_id not found in session. Socket ID: {request.sid}")
+                print(f"   Available attributes: {[attr for attr in dir(request) if not attr.startswith('_')]}")
                 return {'error': 'Not authenticated'}
             
             chat_id = data.get('chatId')

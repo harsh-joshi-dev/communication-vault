@@ -12,6 +12,7 @@ const API_BASE_URL = 'https://communication-vault.onrender.com';
 
 class ChatService {
   private socket: Socket | null = null;
+  private isAuthenticated: boolean = false;
   private messageListeners: ((message: Message) => void)[] = [];
   private chatListeners: ((chat: Chat) => void)[] = [];
   private messageStatusListeners: ((update: {
@@ -27,8 +28,8 @@ class ChatService {
   }
 
   async connect(): Promise<void> {
-    if (this.socket?.connected) {
-      console.log('✅ Socket already connected');
+    if (this.socket?.connected && this.isAuthenticated) {
+      console.log('✅ Socket already connected and authenticated');
       return Promise.resolve();
     }
 
@@ -40,8 +41,13 @@ class ChatService {
 
         console.log(`🔌 Connecting to chat server: ${apiUrl}`);
 
+        // Reset authentication status
+        this.isAuthenticated = false;
+
         // Disconnect existing socket if any
         if (this.socket) {
+          // Remove all listeners to prevent duplicates
+          this.socket.removeAllListeners();
           this.socket.disconnect();
           this.socket = null;
         }
@@ -65,64 +71,75 @@ class ChatService {
 
         let resolved = false;
         let connectionTimeout: NodeJS.Timeout | null = null;
+        let authTimeout: NodeJS.Timeout | null = null;
 
         // Set up connection timeout (longer for Render cold starts)
         connectionTimeout = setTimeout(() => {
           if (!this.socket?.connected && !resolved) {
             console.warn('⏱️ Connection timeout - but will keep retrying in background');
-            // Don't reject - let reconnection handle it
-            // The socket will keep trying to reconnect
             if (!resolved) {
               resolved = true;
-              // Resolve anyway so app can continue (socket will reconnect in background)
               resolve();
             }
           }
         }, 30000); // 30 seconds timeout
 
+        // Set up authentication timeout
+        authTimeout = setTimeout(() => {
+          if (!this.isAuthenticated && !resolved) {
+            console.warn('⏱️ Authentication timeout - but will keep retrying');
+            if (!resolved) {
+              resolved = true;
+              resolve();
+            }
+          }
+        }, 10000); // 10 seconds for auth
+
         this.socket.on('connect', () => {
-          console.log('✅ Chat connected successfully');
+          console.log('✅ Socket connected, waiting for authentication...');
           console.log('Socket ID:', this.socket?.id);
-          if (connectionTimeout) {
-            clearTimeout(connectionTimeout);
-          }
-          if (!resolved) {
-            resolved = true;
-            resolve();
-          }
+          // Don't resolve yet - wait for 'connected' event
         });
 
         this.socket.on('connect_error', (error: any) => {
           console.warn('⚠️ Connection error (will retry):', error.message);
+          this.isAuthenticated = false;
           // Don't reject - let reconnection handle it
-          // The socket will automatically retry
         });
 
         this.socket.on('disconnect', (reason) => {
           console.log('⚠️ Chat disconnected:', reason);
+          this.isAuthenticated = false;
           if (reason === 'io server disconnect') {
             // Server disconnected, reconnect manually
             this.socket?.connect();
           }
         });
 
+        // CRITICAL: Wait for server authentication confirmation
         this.socket.on('connected', (data) => {
-          console.log('✅ Connection confirmed by server:', data);
+          console.log('✅ Connection confirmed by server (authenticated):', data);
+          this.isAuthenticated = true;
+          
+          if (connectionTimeout) {
+            clearTimeout(connectionTimeout);
+          }
+          if (authTimeout) {
+            clearTimeout(authTimeout);
+          }
+          
+          if (!resolved) {
+            resolved = true;
+            resolve();
+          }
         });
 
         // Set up event listeners
         this.setupEventListeners();
 
-        // If socket connects quickly, resolve immediately
+        // If socket connects quickly, still wait for authentication
         if (this.socket.connected) {
-          console.log('✅ Socket connected immediately');
-          if (connectionTimeout) {
-            clearTimeout(connectionTimeout);
-          }
-          if (!resolved) {
-            resolved = true;
-            resolve();
-          }
+          console.log('✅ Socket connected immediately, waiting for authentication...');
         }
       }).catch((error) => {
         console.error('❌ Error getting device info:', error);
@@ -311,34 +328,42 @@ class ChatService {
       receiverUniqueCode?: string;
     },
   ): Promise<Message> {
-    // CRITICAL: Try to connect if not connected (non-blocking)
-    if (!this.socket?.connected) {
-      console.log('⚠️ Socket not connected, attempting to connect in background...');
-      // Start connection in background (don't wait)
-      this.connect().catch(err => {
-        console.warn('Background connection attempt:', err.message);
-        // Connection will retry automatically
-      });
-      
-      // Wait a bit for quick connections
-      let retries = 0;
-      while (!this.socket?.connected && retries < 5) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-        retries++;
+    // CRITICAL: Ensure socket is connected AND authenticated before sending
+    if (!this.socket?.connected || !this.isAuthenticated) {
+      console.log('⚠️ Socket not connected/authenticated, attempting to connect...');
+      try {
+        // Try to connect and wait for authentication
+        await this.connect();
+        
+        // Wait a bit more for authentication if needed
+        let retries = 0;
+        while ((!this.socket?.connected || !this.isAuthenticated) && retries < 10) {
+          await new Promise(resolve => setTimeout(resolve, 300));
+          retries++;
+        }
+      } catch (err) {
+        console.warn('Connection attempt failed:', err);
       }
     }
 
-    // Log connection status but don't throw error
+    // Log connection and authentication status
     if (!this.socket || !this.socket.connected) {
       console.warn('⚠️ Socket not connected, message will be sent optimistically');
       console.log('Socket state:', {
         exists: !!this.socket,
         connected: this.socket?.connected,
-        disconnected: this.socket?.disconnected,
+        authenticated: this.isAuthenticated,
+      });
+      // Don't throw - allow optimistic sending
+    } else if (!this.isAuthenticated) {
+      console.warn('⚠️ Socket connected but not authenticated, message will be sent optimistically');
+      console.log('Socket state:', {
+        connected: this.socket.connected,
+        authenticated: this.isAuthenticated,
       });
       // Don't throw - allow optimistic sending
     } else {
-      console.log('✅ Socket connected, sending message...');
+      console.log('✅ Socket connected and authenticated, sending message...');
     }
 
     // Upload media file if provided
@@ -410,14 +435,14 @@ class ChatService {
         console.error('Error storing message locally:', err)
       );
 
-      // If socket is not initialized or not connected, resolve optimistically
-      if (!this.socket || !this.socket.connected) {
-        console.warn('⚠️ Socket not available, message saved locally and will sync when connected');
+      // If socket is not initialized, not connected, or not authenticated, resolve optimistically
+      if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
+        console.warn('⚠️ Socket not available/authenticated, message saved locally and will sync when connected');
         // Try to initialize socket in background if not initialized
         if (!this.socket) {
           this.connect().catch(err => console.warn('Background connection failed:', err));
         } else {
-          // Socket exists but not connected, try to reconnect
+          // Socket exists but not connected/authenticated, try to reconnect
           this.connect().catch(err => console.warn('Background reconnection failed:', err));
         }
         resolve(message);

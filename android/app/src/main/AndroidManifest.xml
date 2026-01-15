@@ -30,8 +30,11 @@
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:exported="true"
-            android:enabled="false">
-            <!-- Main activity disabled - using aliases instead -->
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
         </activity>
         
         <!-- Activity Aliases for different app icons and names -->
