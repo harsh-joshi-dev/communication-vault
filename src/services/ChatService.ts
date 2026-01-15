@@ -281,6 +281,7 @@ class ChatService {
       fileName?: string;
       fileSize?: number;
       duration?: number;
+      receiverUniqueCode?: string;
     },
   ): Promise<Message> {
     // CRITICAL: Ensure connection before sending
