@@ -110,6 +110,8 @@ class ChatService {
     if (!this.socket) return;
 
     this.socket.on('new_message', async (message: Message) => {
+      console.log('📨 New message received:', message.id, 'from:', message.senderId);
+      
       // Store message locally (non-blocking for speed)
       messageStorageService.saveMessage(message).catch(err => 
         console.error('Error saving message:', err)
@@ -125,11 +127,21 @@ class ChatService {
         const chats = await chatStorageService.getChats();
         let chat = chats.find(c => c.id === message.chatId);
         
+        // If not found by chatId, try to find by participant IDs
+        if (!chat) {
+          chat = chats.find(c => 
+            c.participantIds?.includes(message.senderId) || 
+            c.participantIds?.includes(message.receiverId)
+          );
+        }
+        
         if (!chat && message.senderId !== currentDevice.deviceId) {
-          // Create chat for unknown device
+          // Create chat for unknown device with "Unknown User" name
           const senderDeviceId = message.senderId;
-          const senderUniqueCode = message.senderId.substring(0, 8).toUpperCase(); // Use first 8 chars as code
-          const senderName = `Device ${senderUniqueCode}`; // Show as "Device XXXXXXXX"
+          const senderUniqueCode = senderDeviceId.substring(0, 8).toUpperCase();
+          const senderName = 'Unknown User'; // Default name until user edits it
+          
+          console.log('📝 Creating new chat for unknown device:', senderDeviceId);
           
           chat = await chatStorageService.getOrCreateChat(
             senderDeviceId,
@@ -147,12 +159,14 @@ class ChatService {
         // Update chat with message (increments unread count if from other user)
         if (chat) {
           await chatStorageService.updateChatWithMessage(chat.id, message);
+          console.log('✅ Chat updated with message:', chat.id);
         }
       } catch (error) {
-        console.error('Error ensuring chat exists:', error);
+        console.error('❌ Error ensuring chat exists:', error);
       }
       
       // Notify listeners immediately (optimistic update)
+      console.log('🔔 Notifying message listeners');
       this.messageListeners.forEach(listener => listener(message));
     });
 
@@ -374,16 +388,27 @@ class ChatService {
         console.error('Error storing message locally:', err)
       );
 
+      console.log('📤 Emitting send_message:', {
+        chatId,
+        receiverId,
+        receiverUniqueCode: options?.receiverUniqueCode,
+        type,
+        contentLength: content.length,
+      });
+
       this.socket.emit('send_message', messageData, async (response: any) => {
         try {
+          console.log('📥 Received response from server:', response);
+          
           // Handle undefined or null response
           if (!response) {
-            console.error('No response from server');
+            console.error('❌ No response from server');
             reject(new Error('No response from server'));
             return;
           }
 
           if (response.error) {
+            console.error('❌ Server error:', response.error);
             // Check for specific error types
             if (response.error.includes('not registered') || response.error.includes('not invited')) {
               reject(new Error('User is not registered or invited. Please invite them first.'));
@@ -391,17 +416,27 @@ class ChatService {
               reject(new Error(response.error));
             }
           } else if (response.message) {
+            console.log('✅ Message sent successfully:', response.message.id);
             // Update local storage with server response (includes server ID, timestamps, etc.)
             const serverMessage = response.message;
             await messageStorageService.saveMessage(serverMessage);
+            
+            // Also update chat with the sent message
+            try {
+              const {chatStorageService} = await import('./ChatStorageService');
+              await chatStorageService.updateChatWithMessage(chatId, serverMessage);
+            } catch (err) {
+              console.error('Error updating chat:', err);
+            }
+            
             resolve(serverMessage);
           } else {
             // If no error and no message, assume success and use the optimistic message
-            console.warn('Server response missing message field, using optimistic message');
+            console.warn('⚠️ Server response missing message field, using optimistic message');
             resolve(message);
           }
         } catch (error: any) {
-          console.error('Error handling send_message response:', error);
+          console.error('❌ Error handling send_message response:', error);
           reject(new Error(error?.message || 'Failed to send message'));
         }
       });
