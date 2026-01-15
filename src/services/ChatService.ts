@@ -166,6 +166,13 @@ class ChatService {
     // New message received
     this.socket.on('new_message', async (messageData: any) => {
       try {
+        console.log('📥 Received new message:', {
+          id: messageData.id || messageData._id,
+          chatId: messageData.chatId || messageData.chat_id,
+          senderId: messageData.senderId || messageData.sender_id,
+          type: messageData.type,
+        });
+        
         const message: Message = {
           id: messageData.id || messageData._id || uuidv4(),
           chatId: messageData.chatId || messageData.chat_id,
@@ -190,9 +197,11 @@ class ChatService {
 
         // Save to local storage
         await messageStorageService.saveMessage(message);
+        console.log('✅ Message saved locally');
 
         // Notify listeners
         this.messageListeners.forEach(listener => listener(message));
+        console.log('✅ Message listeners notified');
       } catch (error: any) {
         console.error('Error handling new message:', error);
       }
