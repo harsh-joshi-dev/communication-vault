@@ -516,8 +516,15 @@ class ChatService {
     resolve: (message: Message) => void,
     responseTimeout: NodeJS.Timeout
   ) {
-    if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
-      console.error('❌ Cannot send message: socket not authenticated');
+    // Verify socket is actually connected and has an ID
+    if (!this.socket || !this.socket.connected || !this.isAuthenticated || !this.socket.id) {
+      console.error('❌ Cannot send message: socket not authenticated or no socket ID');
+      console.log('Socket state:', {
+        exists: !!this.socket,
+        connected: this.socket?.connected,
+        authenticated: this.isAuthenticated,
+        socketId: this.socket?.id,
+      });
       resolve(optimisticMessage);
       return;
     }
@@ -528,6 +535,7 @@ class ChatService {
       receiverUniqueCode: messageData.receiverUniqueCode,
       type: messageData.type,
       contentLength: messageData.content?.length || 0,
+      socketId: this.socket.id,
     });
 
     this.socket.emit('send_message', messageData, async (response: any) => {
