@@ -387,8 +387,11 @@ class ChatService {
         // Try to connect and wait for authentication - this will throw if it fails
         await this.connect();
         
-        // Double-check authentication after connect
-        if (!this.isAuthenticated || !this.socket?.connected) {
+        // Wait for connection to stabilize (important for Render cold starts)
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        // Double-check authentication after connect and stabilization
+        if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id) {
           throw new Error('Socket not authenticated after connection');
         }
         
@@ -397,10 +400,13 @@ class ChatService {
         console.error('❌ Connection attempt failed:', err.message);
         // Try one more time after a short delay
         try {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise(resolve => setTimeout(resolve, 2000));
           await this.connect();
           
-          if (!this.isAuthenticated || !this.socket?.connected) {
+          // Wait for stabilization again
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          
+          if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id) {
             throw new Error('Socket still not authenticated after retry');
           }
         } catch (retryErr: any) {
