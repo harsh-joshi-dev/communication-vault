@@ -339,27 +339,30 @@ const ChatDetailScreen: React.FC = () => {
         async response => {
           if (response.assets && response.assets[0]) {
             const asset = response.assets[0];
-            try {
-              const sentMessage = await chatService.sendMessage(
-                chatId,
-                receiverId || undefined,
-                'image',
-                asset.fileName || 'image.jpg',
-                asset.uri,
-                {
-                  fileName: asset.fileName,
-                  fileSize: asset.fileSize,
-                  isAppUser: isAppUser ?? false,
-                  phoneNumber,
-                  contactName,
-                  email,
-                },
+            // Send image (never throws errors)
+            chatService.sendMessage(
+              chatId,
+              receiverId || undefined,
+              'image',
+              asset.fileName || 'image.jpg',
+              asset.uri,
+              {
+                fileName: asset.fileName,
+                fileSize: asset.fileSize,
+                isAppUser: isAppUser ?? false,
+                phoneNumber,
+                contactName,
+                email,
+                receiverUniqueCode: receiverUniqueCode,
+              },
+            ).then((sentMessage) => {
+              chatStorageService.updateChatWithMessage(chatId, sentMessage).catch(err => 
+                console.error('Error updating chat:', err)
               );
-              await chatStorageService.updateChatWithMessage(chatId, sentMessage);
               scrollToBottom();
-            } catch (error: any) {
-              Alert.alert('Error', error?.message || 'Failed to send image');
-            }
+            }).catch((error: any) => {
+              console.warn('Image send warning (saved locally):', error?.message);
+            });
           }
         },
       );
