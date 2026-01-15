@@ -476,7 +476,20 @@ class ChatService {
 
   async joinChat(chatId: string): Promise<void> {
     if (this.socket?.connected && this.isAuthenticated) {
+      console.log('📥 Joining chat room:', chatId);
       this.socket.emit('join_chat', {chatId});
+    } else {
+      console.warn('⚠️ Cannot join chat - socket not connected/authenticated');
+      // Try to connect first
+      try {
+        await this.connect();
+        if (this.socket?.connected && this.isAuthenticated) {
+          console.log('📥 Joining chat room after reconnection:', chatId);
+          this.socket.emit('join_chat', {chatId});
+        }
+      } catch (error) {
+        console.error('❌ Failed to connect before joining chat:', error);
+      }
     }
   }
 
