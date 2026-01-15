@@ -17,6 +17,7 @@ const getApiBaseUrl = () => {
 class ChatService {
   private socket: Socket | null = null;
   private isAuthenticated: boolean = false;
+  private connectionStable: boolean = false; // Track if connection is stable
   private messageListeners: ((message: Message) => void)[] = [];
   private chatListeners: ((chat: Chat) => void)[] = [];
   private messageStatusListeners: ((update: {
@@ -140,6 +141,7 @@ class ChatService {
         this.socket.on('disconnect', (reason) => {
           console.log('⚠️ Chat disconnected:', reason);
           this.isAuthenticated = false;
+          this.connectionStable = false; // Reset stability flag
           
           // Handle different disconnect reasons
           if (reason === 'io server disconnect') {
@@ -150,10 +152,12 @@ class ChatService {
             // Transport error - socket.io will auto-reconnect, but reset auth state
             console.log('🔄 Transport error, will auto-reconnect...');
             this.isAuthenticated = false;
+            this.connectionStable = false;
           } else if (reason === 'ping timeout') {
             // Ping timeout - connection lost
             console.log('🔄 Ping timeout, will reconnect...');
             this.isAuthenticated = false;
+            this.connectionStable = false;
           }
         });
 
@@ -166,7 +170,19 @@ class ChatService {
             // Double-check socket is still connected before marking as authenticated
             if (this.socket?.connected && this.socket?.id) {
               this.isAuthenticated = true;
-              console.log('✅ Socket authenticated and stable');
+              this.connectionStable = false; // Reset stability flag
+              
+              // Wait additional time to ensure connection is truly stable
+              setTimeout(() => {
+                if (this.socket?.connected && this.socket?.id) {
+                  this.connectionStable = true;
+                  console.log('✅ Socket authenticated and stable');
+                } else {
+                  console.warn('⚠️ Socket disconnected during stability check');
+                  this.isAuthenticated = false;
+                  this.connectionStable = false;
+                }
+              }, 1000); // Wait 1 second to verify stability
               
               if (connectionTimeout) {
                 clearTimeout(connectionTimeout);
@@ -182,6 +198,7 @@ class ChatService {
             } else {
               console.warn('⚠️ Socket disconnected before authentication completed');
               this.isAuthenticated = false;
+              this.connectionStable = false;
             }
           }, 500); // Wait 500ms to ensure connection is stable
         });
@@ -380,8 +397,8 @@ class ChatService {
       receiverUniqueCode?: string;
     },
   ): Promise<Message> {
-    // CRITICAL: Ensure socket is connected AND authenticated before sending
-    if (!this.socket?.connected || !this.isAuthenticated) {
+    // CRITICAL: Ensure socket is connected, authenticated, and stable before sending
+    if (!this.socket?.connected || !this.isAuthenticated || !this.connectionStable) {
       console.log('⚠️ Socket not connected/authenticated, attempting to connect...');
       try {
         // Try to connect and wait for authentication - this will throw if it fails
@@ -390,9 +407,17 @@ class ChatService {
         // Wait for connection to stabilize (important for Render cold starts)
         await new Promise(resolve => setTimeout(resolve, 1500));
         
-        // Double-check authentication after connect and stabilization
-        if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id) {
-          throw new Error('Socket not authenticated after connection');
+        // Double-check authentication and stability after connect
+        if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
+          // If not stable yet, wait a bit more
+          if (this.isAuthenticated && this.socket?.connected && this.socket?.id && !this.connectionStable) {
+            console.log('⏳ Waiting for connection to stabilize...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+          
+          if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
+            throw new Error('Socket not stable after connection');
+          }
         }
         
         console.log('✅ Socket connected and authenticated successfully');
@@ -406,8 +431,15 @@ class ChatService {
           // Wait for stabilization again
           await new Promise(resolve => setTimeout(resolve, 1500));
           
-          if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id) {
-            throw new Error('Socket still not authenticated after retry');
+          if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
+            // Wait a bit more for stability
+            if (this.isAuthenticated && this.socket?.connected && this.socket?.id && !this.connectionStable) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            
+            if (!this.isAuthenticated || !this.socket?.connected || !this.socket?.id || !this.connectionStable) {
+              throw new Error('Socket still not stable after retry');
+            }
           }
         } catch (retryErr: any) {
           console.error('❌ Retry connection also failed:', retryErr.message);
