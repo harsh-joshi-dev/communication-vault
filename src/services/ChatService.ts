@@ -86,24 +86,24 @@ class ChatService {
         // Set up connection timeout (longer for Render cold starts)
         connectionTimeout = setTimeout(() => {
           if (!this.socket?.connected && !resolved) {
-            console.warn('⏱️ Connection timeout - but will keep retrying in background');
+            console.error('❌ Connection timeout after 30 seconds');
             if (!resolved) {
               resolved = true;
-              resolve();
+              reject(new Error('Connection timeout'));
             }
           }
         }, 30000); // 30 seconds timeout
 
-        // Set up authentication timeout
+        // Set up authentication timeout - CRITICAL: Don't resolve if not authenticated
         authTimeout = setTimeout(() => {
           if (!this.isAuthenticated && !resolved) {
-            console.warn('⏱️ Authentication timeout - but will keep retrying');
+            console.error('❌ Authentication timeout after 15 seconds');
             if (!resolved) {
               resolved = true;
-              resolve();
+              reject(new Error('Authentication timeout'));
             }
           }
-        }, 10000); // 10 seconds for auth
+        }, 15000); // 15 seconds for auth (increased from 10)
 
         this.socket.on('connect', () => {
           console.log('✅ Socket connected, waiting for authentication...');
@@ -112,9 +112,12 @@ class ChatService {
         });
 
         this.socket.on('connect_error', (error: any) => {
-          console.warn('⚠️ Connection error (will retry):', error.message);
+          console.error('❌ Connection error:', error.message);
           this.isAuthenticated = false;
-          // Don't reject - let reconnection handle it
+          if (!resolved) {
+            resolved = true;
+            reject(error);
+          }
         });
 
         this.socket.on('disconnect', (reason) => {
@@ -342,36 +345,45 @@ class ChatService {
     if (!this.socket?.connected || !this.isAuthenticated) {
       console.log('⚠️ Socket not connected/authenticated, attempting to connect...');
       try {
-        // Try to connect and wait for authentication
+        // Try to connect and wait for authentication - this will throw if it fails
         await this.connect();
         
-        // Wait a bit more for authentication if needed
-        let retries = 0;
-        while ((!this.socket?.connected || !this.isAuthenticated) && retries < 10) {
-          await new Promise(resolve => setTimeout(resolve, 300));
-          retries++;
+        // Double-check authentication after connect
+        if (!this.isAuthenticated || !this.socket?.connected) {
+          throw new Error('Socket not authenticated after connection');
         }
-      } catch (err) {
-        console.warn('Connection attempt failed:', err);
+        
+        console.log('✅ Socket connected and authenticated successfully');
+      } catch (err: any) {
+        console.error('❌ Connection attempt failed:', err.message);
+        // Try one more time after a short delay
+        try {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          await this.connect();
+          
+          if (!this.isAuthenticated || !this.socket?.connected) {
+            throw new Error('Socket still not authenticated after retry');
+          }
+        } catch (retryErr: any) {
+          console.error('❌ Retry connection also failed:', retryErr.message);
+          // Still allow optimistic sending, but log the error
+        }
       }
     }
 
-    // Log connection and authentication status
-    if (!this.socket || !this.socket.connected) {
-      console.warn('⚠️ Socket not connected, message will be sent optimistically');
-      console.log('Socket state:', {
+    // Verify connection and authentication status
+    if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
+      console.error('❌ Socket not available/authenticated:', {
         exists: !!this.socket,
         connected: this.socket?.connected,
         authenticated: this.isAuthenticated,
       });
-      // Don't throw - allow optimistic sending
-    } else if (!this.isAuthenticated) {
-      console.warn('⚠️ Socket connected but not authenticated, message will be sent optimistically');
-      console.log('Socket state:', {
-        connected: this.socket.connected,
-        authenticated: this.isAuthenticated,
-      });
-      // Don't throw - allow optimistic sending
+      // Still proceed with optimistic sending, but try to connect in background
+      if (!this.socket) {
+        this.connect().catch(err => console.error('Background connection failed:', err));
+      } else {
+        this.connect().catch(err => console.error('Background reconnection failed:', err));
+      }
     } else {
       console.log('✅ Socket connected and authenticated, sending message...');
     }
@@ -445,87 +457,106 @@ class ChatService {
         console.error('Error storing message locally:', err)
       );
 
-      // If socket is not initialized, not connected, or not authenticated, resolve optimistically
-      if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
-        console.warn('⚠️ Socket not available/authenticated, message saved locally and will sync when connected');
-        console.log('Socket state:', {
-          exists: !!this.socket,
-          connected: this.socket?.connected,
-          authenticated: this.isAuthenticated,
-        });
-        
-        // Try to initialize socket in background if not initialized
-        if (!this.socket) {
-          this.connect().catch(err => console.warn('Background connection failed:', err));
-        } else {
-          // Socket exists but not connected/authenticated, try to reconnect
-          this.connect().catch(err => console.warn('Background reconnection failed:', err));
-        }
-        
-        // Resolve optimistically - message is saved locally
-        resolve(message);
-        return;
-      }
-
-      console.log('📤 Emitting send_message:', {
-        chatId,
-        receiverId,
-        receiverUniqueCode: options?.receiverUniqueCode,
-        type,
-        contentLength: content.length,
-      });
-
       // Set up response timeout
       const responseTimeout = setTimeout(() => {
-        console.warn('⏱️ No response from server, using optimistic message');
+        console.warn('⏱️ No response from server after 10 seconds, using optimistic message');
         resolve(message); // Resolve optimistically
       }, 10000); // 10 second timeout
 
-      this.socket.emit('send_message', messageData, async (response: any) => {
-        try {
-          clearTimeout(responseTimeout);
-          console.log('📥 Received response from server:', response);
-          
-          // Handle undefined or null response
-          if (!response) {
-            console.warn('⚠️ No response from server, using optimistic message');
-            resolve(message);
-            return;
-          }
-
-          if (response.error) {
-            console.error('❌ Server error:', response.error);
-            // For all errors, resolve optimistically (message is saved locally)
-            console.warn('⚠️ Server error but keeping message locally:', response.error);
-            resolve(message);
-          } else if (response.message) {
-            console.log('✅ Message sent successfully:', response.message.id);
-            // Update local storage with server response (includes server ID, timestamps, etc.)
-            const serverMessage = response.message;
-            await messageStorageService.saveMessage(serverMessage);
-            
-            // Also update chat with the sent message
-            try {
-              const {chatStorageService} = await import('./ChatStorageService');
-              await chatStorageService.updateChatWithMessage(chatId, serverMessage);
-            } catch (err) {
-              console.error('Error updating chat:', err);
+      // If socket is not initialized, not connected, or not authenticated, try to connect first
+      if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
+        console.warn('⚠️ Socket not available/authenticated, attempting connection before sending...');
+        
+        // Try to connect synchronously one more time
+        this.connect()
+          .then(() => {
+            // Connection successful, proceed with sending
+            if (this.socket?.connected && this.isAuthenticated) {
+              this.sendMessageToServer(messageData, message, resolve, responseTimeout);
+            } else {
+              console.warn('⚠️ Still not authenticated after connect, saving locally');
+              clearTimeout(responseTimeout);
+              resolve(message);
             }
-            
-            resolve(serverMessage);
-          } else {
-            // If no error and no message, assume success and use the optimistic message
-            console.warn('⚠️ Server response missing message field, using optimistic message');
+          })
+          .catch((err) => {
+            console.error('❌ Final connection attempt failed, saving locally:', err);
+            clearTimeout(responseTimeout);
+            // Resolve optimistically - message is saved locally
             resolve(message);
-          }
-        } catch (error: any) {
-          clearTimeout(responseTimeout);
-          console.error('❌ Error handling send_message response:', error);
-          // Resolve optimistically instead of rejecting
-          console.warn('⚠️ Resolving optimistically due to error');
-          resolve(message);
+          });
+        return;
+      }
+
+      // Socket is connected and authenticated, send message
+      this.sendMessageToServer(messageData, message, resolve, responseTimeout);
+    });
+  }
+
+  private sendMessageToServer(
+    messageData: any,
+    optimisticMessage: Message,
+    resolve: (message: Message) => void,
+    responseTimeout: NodeJS.Timeout
+  ) {
+    if (!this.socket || !this.socket.connected || !this.isAuthenticated) {
+      console.error('❌ Cannot send message: socket not authenticated');
+      resolve(optimisticMessage);
+      return;
+    }
+
+    console.log('📤 Emitting send_message:', {
+      chatId: messageData.chatId,
+      receiverId: messageData.receiverId,
+      receiverUniqueCode: messageData.receiverUniqueCode,
+      type: messageData.type,
+      contentLength: messageData.content?.length || 0,
+    });
+
+    this.socket.emit('send_message', messageData, async (response: any) => {
+      try {
+        clearTimeout(responseTimeout);
+        console.log('📥 Received response from server:', response);
+        
+        // Handle undefined or null response
+        if (!response) {
+          console.warn('⚠️ No response from server, using optimistic message');
+          resolve(optimisticMessage);
+          return;
         }
-      });
+
+        if (response.error) {
+          console.error('❌ Server error:', response.error);
+          // For all errors, resolve optimistically (message is saved locally)
+          console.warn('⚠️ Server error but keeping message locally:', response.error);
+          resolve(optimisticMessage);
+        } else if (response.message) {
+          console.log('✅ Message sent successfully:', response.message.id);
+          // Update local storage with server response (includes server ID, timestamps, etc.)
+          const serverMessage = response.message;
+          await messageStorageService.saveMessage(serverMessage);
+          
+          // Also update chat with the sent message
+          try {
+            const {chatStorageService} = await import('./ChatStorageService');
+            await chatStorageService.updateChatWithMessage(optimisticMessage.chatId, serverMessage);
+          } catch (err) {
+            console.error('Error updating chat:', err);
+          }
+          
+          resolve(serverMessage);
+        } else {
+          // If no error and no message, assume success and use the optimistic message
+          console.warn('⚠️ Server response missing message field, using optimistic message');
+          resolve(optimisticMessage);
+        }
+      } catch (error: any) {
+        clearTimeout(responseTimeout);
+        console.error('❌ Error handling send_message response:', error);
+        // Resolve optimistically instead of rejecting
+        console.warn('⚠️ Resolving optimistically due to error');
+        resolve(optimisticMessage);
+      }
     });
   }
 
@@ -605,16 +636,30 @@ class ChatService {
   }
 
   async markAsRead(chatId: string, messageIds: string[]): Promise<void> {
-    // Use socket.io for marking as read (more reliable)
+    // Ensure socket is connected and authenticated before marking as read
+    if (!this.socket?.connected || !this.isAuthenticated) {
+      console.log('⚠️ Socket not connected/authenticated, attempting to connect...');
+      try {
+        await this.connect();
+        
+        // Double-check after connection
+        if (!this.socket?.connected || !this.isAuthenticated) {
+          console.warn('⚠️ Still not authenticated after connect, skipping mark as read');
+          return;
+        }
+      } catch (err: any) {
+        console.error('❌ Connection failed for mark as read:', err.message);
+        return;
+      }
+    }
+    
+    // Use socket.io for marking as read
     if (this.socket?.connected && this.isAuthenticated) {
       console.log('📖 Marking messages as read via socket:', {chatId, messageIds});
       this.socket.emit('mark_read', {chatId, messageIds});
     } else {
       console.warn('⚠️ Socket not connected/authenticated, skipping mark as read');
     }
-    
-    // HTTP API backup is not needed since socket handles it
-    // The HTTP endpoint requires JWT token which may not be available
   }
 
 }
