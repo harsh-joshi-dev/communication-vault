@@ -101,7 +101,12 @@ socketio = SocketIO(
     logger=os.environ.get('LOG_LEVEL', 'info') == 'debug',
     engineio_logger=os.environ.get('LOG_LEVEL', 'info') == 'debug',
     ping_timeout=60,
-    ping_interval=25
+    ping_interval=25,
+    max_http_buffer_size=1e8,  # 100MB for file uploads
+    allow_upgrades=True,
+    transports=['websocket', 'polling'],  # Allow both transports
+    cookie=False,  # Don't use cookies for better compatibility
+    always_connect=True  # Always allow connections
 )
 
 # Register blueprints

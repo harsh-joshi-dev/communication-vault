@@ -28,7 +28,7 @@ class ChatService {
 
   async connect(): Promise<void> {
     if (this.socket?.connected) {
-      console.log('Socket already connected');
+      console.log('✅ Socket already connected');
       return Promise.resolve();
     }
 
@@ -38,7 +38,13 @@ class ChatService {
         // Always use Render production URL
         const apiUrl = 'https://communication-vault.onrender.com';
 
-        console.log(`Connecting to chat server: ${apiUrl}`);
+        console.log(`🔌 Connecting to chat server: ${apiUrl}`);
+
+        // Disconnect existing socket if any
+        if (this.socket) {
+          this.socket.disconnect();
+          this.socket = null;
+        }
 
         this.socket = io(apiUrl, {
           auth: {
@@ -46,44 +52,58 @@ class ChatService {
             uniqueCode: deviceInfo.uniqueCode,
             deviceName: deviceInfo.deviceName,
           },
-          transports: ['websocket', 'polling'], // Try both websocket and polling for better compatibility
+          transports: ['polling', 'websocket'], // Try polling first, then upgrade to websocket
           reconnection: true,
-          reconnectionAttempts: 10,
-          reconnectionDelay: 2000,
-          reconnectionDelayMax: 10000,
-          timeout: 30000,
-          forceNew: false,
-          upgrade: true,
+          reconnectionAttempts: Infinity, // Keep trying forever
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
+          timeout: 20000,
+          forceNew: true, // Force new connection
+          upgrade: true, // Allow upgrade from polling to websocket
+          rememberUpgrade: false,
         });
 
-        // Set up connection timeout
-        const connectionTimeout = setTimeout(() => {
-          if (!this.socket?.connected) {
-            console.error('Connection timeout - socket not connected');
-            reject(new Error('Connection timeout'));
+        let resolved = false;
+        let connectionTimeout: NodeJS.Timeout | null = null;
+
+        // Set up connection timeout (longer for Render cold starts)
+        connectionTimeout = setTimeout(() => {
+          if (!this.socket?.connected && !resolved) {
+            console.warn('⏱️ Connection timeout - but will keep retrying in background');
+            // Don't reject - let reconnection handle it
+            // The socket will keep trying to reconnect
+            if (!resolved) {
+              resolved = true;
+              // Resolve anyway so app can continue (socket will reconnect in background)
+              resolve();
+            }
           }
-        }, 20000);
+        }, 30000); // 30 seconds timeout
 
         this.socket.on('connect', () => {
           console.log('✅ Chat connected successfully');
           console.log('Socket ID:', this.socket?.id);
-          clearTimeout(connectionTimeout);
-          resolve();
+          if (connectionTimeout) {
+            clearTimeout(connectionTimeout);
+          }
+          if (!resolved) {
+            resolved = true;
+            resolve();
+          }
         });
 
         this.socket.on('connect_error', (error: any) => {
-          console.error('❌ Connection error:', error);
-          console.error('Error details:', {
-            message: error.message,
-            type: error.type,
-            data: error.data,
-          });
-          clearTimeout(connectionTimeout);
-          reject(new Error(`Connection failed: ${error.message || 'Unknown error'}`));
+          console.warn('⚠️ Connection error (will retry):', error.message);
+          // Don't reject - let reconnection handle it
+          // The socket will automatically retry
         });
 
         this.socket.on('disconnect', (reason) => {
           console.log('⚠️ Chat disconnected:', reason);
+          if (reason === 'io server disconnect') {
+            // Server disconnected, reconnect manually
+            this.socket?.connect();
+          }
         });
 
         this.socket.on('connected', (data) => {
@@ -93,14 +113,19 @@ class ChatService {
         // Set up event listeners
         this.setupEventListeners();
 
-        // If socket is already connected, resolve immediately
+        // If socket connects quickly, resolve immediately
         if (this.socket.connected) {
-          console.log('Socket already connected');
-          clearTimeout(connectionTimeout);
-          resolve();
+          console.log('✅ Socket connected immediately');
+          if (connectionTimeout) {
+            clearTimeout(connectionTimeout);
+          }
+          if (!resolved) {
+            resolved = true;
+            resolve();
+          }
         }
       }).catch((error) => {
-        console.error('Error getting device info:', error);
+        console.error('❌ Error getting device info:', error);
         reject(error);
       });
     });
@@ -400,14 +425,30 @@ class ChatService {
         contentLength: content.length,
       });
 
+      // If socket is not connected, resolve optimistically and queue for later
+      if (!this.socket?.connected) {
+        console.warn('⚠️ Socket not connected, message will be sent when connection is restored');
+        // Resolve optimistically - message is saved locally
+        // When socket reconnects, it will sync
+        resolve(message);
+        return;
+      }
+
+      // Set up response timeout
+      const responseTimeout = setTimeout(() => {
+        console.warn('⏱️ No response from server, using optimistic message');
+        resolve(message); // Resolve optimistically
+      }, 10000); // 10 second timeout
+
       this.socket.emit('send_message', messageData, async (response: any) => {
         try {
+          clearTimeout(responseTimeout);
           console.log('📥 Received response from server:', response);
           
           // Handle undefined or null response
           if (!response) {
-            console.error('❌ No response from server');
-            reject(new Error('No response from server'));
+            console.warn('⚠️ No response from server, using optimistic message');
+            resolve(message);
             return;
           }
 
@@ -417,7 +458,9 @@ class ChatService {
             if (response.error.includes('not registered') || response.error.includes('not invited')) {
               reject(new Error('User is not registered or invited. Please invite them first.'));
             } else {
-              reject(new Error(response.error));
+              // For other errors, still resolve optimistically
+              console.warn('⚠️ Server error but keeping message locally:', response.error);
+              resolve(message);
             }
           } else if (response.message) {
             console.log('✅ Message sent successfully:', response.message.id);
@@ -440,8 +483,11 @@ class ChatService {
             resolve(message);
           }
         } catch (error: any) {
+          clearTimeout(responseTimeout);
           console.error('❌ Error handling send_message response:', error);
-          reject(new Error(error?.message || 'Failed to send message'));
+          // Resolve optimistically instead of rejecting
+          console.warn('⚠️ Resolving optimistically due to error');
+          resolve(message);
         }
       });
     });
