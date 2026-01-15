@@ -370,12 +370,15 @@ class ChatService {
       createdAt: new Date().toISOString(),
     };
 
-    // Add non-app user info to message data
+    // Add non-app user info and receiverUniqueCode to message data
     const messageData: any = {...message};
     if (options && !options.isAppUser) {
       messageData.phoneNumber = options.phoneNumber;
       messageData.contactName = options.contactName;
       messageData.email = options.email;
+    }
+    if (options?.receiverUniqueCode) {
+      messageData.receiverUniqueCode = options.receiverUniqueCode;
     }
 
     return new Promise((resolve, reject) => {
