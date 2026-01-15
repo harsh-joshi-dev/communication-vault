@@ -94,7 +94,7 @@ def register_socket_handlers(socketio_instance):
     
     @socketio_instance.on('join_chat')
     def handle_join_chat(data):
-        """Join a chat room"""
+        """Join a chat room, device room, or code room"""
         try:
             from flask import request
             session_data = device_sessions.get(request.sid, {})
@@ -104,14 +104,31 @@ def register_socket_handlers(socketio_instance):
             if not device_id or not chat_id:
                 return
             
-            # Verify device is part of chat
-            chat = Chat.objects(id=chat_id).first()
-            if chat and (chat.user1_id == device_id or chat.user2_id == device_id):
-                join_room(f'chat_{chat_id}')
-                emit('joined_chat', {'chatId': chat_id})
-                print(f"Device {device_id} joined chat {chat_id}")
+            # Handle different room types
+            if chat_id.startswith('device_'):
+                # Device room - allow joining own device room
+                room_device_id = chat_id.replace('device_', '')
+                if room_device_id == device_id:
+                    join_room(chat_id)
+                    print(f"Device {device_id} joined device room {chat_id}")
+            elif chat_id.startswith('code_'):
+                # Code room - allow joining own code room
+                room_code = chat_id.replace('code_', '')
+                unique_code = session_data.get('unique_code') or getattr(request, 'sid_unique_code', None)
+                if room_code == unique_code:
+                    join_room(chat_id)
+                    print(f"Device {device_id} joined code room {chat_id}")
+            else:
+                # Regular chat room - verify device is part of chat
+                chat = Chat.objects(id=chat_id).first()
+                if chat and (chat.user1_id == device_id or chat.user2_id == device_id):
+                    join_room(f'chat_{chat_id}')
+                    emit('joined_chat', {'chatId': chat_id})
+                    print(f"Device {device_id} joined chat {chat_id}")
         except Exception as e:
             print(f"Join chat error: {e}")
+            import traceback
+            traceback.print_exc()
     
     @socketio_instance.on('leave_chat')
     def handle_leave_chat(data):

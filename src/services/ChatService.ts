@@ -199,9 +199,23 @@ class ChatService {
         await messageStorageService.saveMessage(message);
         console.log('✅ Message saved locally');
 
+        // Update chat with new message (updateChatWithMessage already handles unread count)
+        try {
+          const {chatStorageService} = await import('./ChatStorageService');
+          await chatStorageService.updateChatWithMessage(message.chatId, message);
+          console.log('✅ Chat updated with new message');
+        } catch (error: any) {
+          console.error('❌ Error updating chat:', error);
+        }
+
         // Notify listeners
         this.messageListeners.forEach(listener => listener(message));
         console.log('✅ Message listeners notified');
+        
+        // Notify chat listeners
+        this.chatListeners.forEach(listener => {
+          // We'll update chat in the listener if needed
+        });
       } catch (error: any) {
         console.error('Error handling new message:', error);
       }
