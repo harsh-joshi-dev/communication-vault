@@ -198,6 +198,7 @@ class ChatService {
         // Ensure we're joined to the chat room for this message
         if (message.chatId && this.socket?.connected && this.isAuthenticated) {
           await this.joinChat(message.chatId);
+          console.log('✅ Joined chat room for received message:', message.chatId);
         }
 
         // Save to local storage
@@ -403,17 +404,23 @@ class ChatService {
     };
 
     return new Promise((resolve) => {
-      // Set timeout for response
+      // Set timeout for response (increased for better reliability)
       const timeout = setTimeout(() => {
-        console.warn('⏱️ No response from server, using optimistic message');
+        console.warn('⏱️ No response from server after 20s, using optimistic message');
         message.status = 'sent';
         messageStorageService.saveMessage(message).catch(console.error);
         resolve(message);
-      }, 15000);
+      }, 20000); // Increased from 15s to 20s
 
       // Send message
       if (this.socket?.connected && this.isAuthenticated) {
-        console.log('📤 Sending message:', {chatId, type, contentLength: content.length});
+        console.log('📤 Sending message:', {
+          chatId, 
+          type, 
+          contentLength: content.length,
+          receiverId: receiverId,
+          receiverUniqueCode: options?.receiverUniqueCode,
+        });
         
         this.socket.emit('send_message', messageData, async (response: any) => {
           clearTimeout(timeout);
@@ -427,7 +434,11 @@ class ChatService {
           }
 
           if (response?.message) {
-            console.log('✅ Message sent successfully');
+            console.log('✅ Message sent successfully!', {
+              messageId: response.message.id || response.message._id,
+              chatId: response.message.chatId || response.message.chat_id,
+              status: response.message.status,
+            });
             const serverMessage: Message = {
               ...message,
               id: response.message.id || response.message._id || message.id,
@@ -444,6 +455,9 @@ class ChatService {
               await this.joinChat(serverMessage.chatId);
               // Update message's chatId
               serverMessage.chatId = serverMessage.chatId;
+            } else {
+              // Ensure we're in the chat room
+              await this.joinChat(chatId);
             }
             
             await messageStorageService.saveMessage(serverMessage);
@@ -460,9 +474,12 @@ class ChatService {
             
             resolve(serverMessage);
           } else {
-            // No error but no message - assume success
+            // No error but no message - assume success but log warning
+            console.warn('⚠️ Server responded but no message in response, assuming success');
             message.status = 'sent';
             await messageStorageService.saveMessage(message);
+            // Still join chat room
+            await this.joinChat(chatId);
             resolve(message);
           }
         });
