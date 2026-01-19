@@ -204,149 +204,75 @@ def register_socket_handlers(socketio_instance):
             contact_name = data.get('contactName')
             contact_email = data.get('email')
             
-            # Get or create chat - WRAP IN TRY-EXCEPT TO HANDLE MongoDB ERRORS
-            chat = None
-            mongo_available = True
+            # CRITICAL: Skip MongoDB queries - deliver message IMMEDIATELY
+            # MongoDB operations will happen AFTER delivery
+            mongo_available = False  # Assume unavailable initially
+            receiver_device_id = data.get('receiverId')
+            receiver_unique_code = data.get('receiverUniqueCode')
             
+            # Use chat_id from request, or generate new one
+            if chat_id:
+                clean_chat_id = chat_id.replace('chat_', '') if chat_id.startswith('chat_') else chat_id
+                chat_id_str = clean_chat_id
+            else:
+                import uuid
+                chat_id_str = str(uuid.uuid4())
+            
+            # Create in-memory chat object (no MongoDB needed for delivery)
+            class TempChat:
+                def __init__(self, chat_id, user1, user2):
+                    self.id = chat_id
+                    self.user1_id = user1
+                    self.user2_id = user2
+                    self.is_non_app_user = False
+                    self.contact_phone_number = None
+                    self.contact_name = None
+                    self.contact_email = None
+            
+            # Determine receiver ID
+            receiver_actual_device_id = receiver_device_id
+            if receiver_unique_code:
+                # Find actual deviceId from active connections
+                for sid, session_data in device_sessions.items():
+                    if session_data.get('unique_code') == receiver_unique_code:
+                        receiver_actual_device_id = session_data.get('device_id')
+                        print(f"✅ Found receiver device: {receiver_actual_device_id} for uniqueCode: {receiver_unique_code}")
+                        break
+            
+            receiver_id = receiver_actual_device_id or receiver_device_id or receiver_unique_code
+            
+            # Create temp chat (no MongoDB)
+            chat = TempChat(chat_id_str, device_id, receiver_id)
+            
+            print(f"⚡ Using in-memory chat (fast delivery, MongoDB optional): {chat_id_str}")
+            
+            # Try MongoDB in background (non-blocking)
             try:
-                if chat_id:
-                    # Try to find by ID first (handle both UUID and prefixed formats)
-                    try:
-                        # Remove 'chat_' prefix if present
-                        clean_chat_id = chat_id.replace('chat_', '') if chat_id.startswith('chat_') else chat_id
-                        chat = Chat.objects(id=clean_chat_id).first()
-                    except Exception as e:
-                        print(f"⚠️ Error finding chat by ID {chat_id}: {e}")
-                        mongo_available = False
-                        pass
-                
-                if not chat:
-                    # Try to find existing chat by phone number, device ID, or unique code
-                    receiver_device_id = data.get('receiverId')  # This is now deviceId
-                    receiver_unique_code = data.get('receiverUniqueCode')  # Also check unique code
-                    
-                    try:
-                        if receiver_device_id:
-                            # Try to find chat between these two devices
-                            chat = Chat.objects(
-                                ((Chat.user1_id == device_id) & (Chat.user2_id == receiver_device_id)) |
-                                ((Chat.user1_id == receiver_device_id) & (Chat.user2_id == device_id))
-                            ).first()
-                        
-                        # If not found by device ID, try by unique code
-                        if not chat and receiver_unique_code:
-                            # Try finding by unique code (stored as user2_id for app users)
-                            chat = Chat.objects(
-                                ((Chat.user1_id == device_id) & (Chat.user2_id == receiver_unique_code)) |
-                                ((Chat.user1_id == receiver_unique_code) & (Chat.user2_id == device_id))
-                            ).first()
-                        
-                        # If not found by device ID, try by unique code (if we have a way to map it)
-                        if not chat and phone_number:
-                            chat = Chat.objects(
-                                user1_id=device_id,
-                                contact_phone_number=phone_number,
-                                is_non_app_user=True
-                            ).first()
-                    except Exception as e:
-                        print(f"⚠️ Error finding chat in MongoDB: {e}")
-                        mongo_available = False
-                        pass
-            except Exception as e:
-                print(f"⚠️ MongoDB connection error, continuing without DB: {e}")
+                # Quick test if MongoDB is available (don't block)
+                from mongoengine import get_db
+                get_db().command('ping')
+                mongo_available = True
+                print(f"✅ MongoDB is available (will save after delivery)")
+            except:
                 mongo_available = False
-                pass
+                print(f"⚠️ MongoDB unavailable (messages will still deliver)")
             
-            if not chat:
-                # Create new chat
-                receiver_device_id = data.get('receiverId')
-                receiver_unique_code = data.get('receiverUniqueCode')
-                
-                # Try to find receiver's actual deviceId from active connections
-                receiver_actual_device_id = receiver_device_id
-                if receiver_unique_code:
-                    # Look through active sessions to find device with this uniqueCode
-                    for sid, session_data in device_sessions.items():
-                        if session_data.get('unique_code') == receiver_unique_code:
-                            receiver_actual_device_id = session_data.get('device_id')
-                            print(f"✅ Found receiver device: {receiver_actual_device_id} for uniqueCode: {receiver_unique_code}")
-                            break
-                
-                # Use actual deviceId if found, otherwise use receiverDeviceId, fallback to uniqueCode
-                receiver_id = receiver_actual_device_id if receiver_actual_device_id else (receiver_device_id if receiver_device_id else receiver_unique_code)
-                
-                if receiver_id:
-                    # App user chat (device to device)
-                    import uuid
-                    new_chat_id = str(uuid.uuid4())
-                    chat = Chat(
-                        id=new_chat_id,
-                        user1_id=device_id,
-                        user2_id=receiver_id,  # Prefer actual deviceId, fallback to uniqueCode
-                        is_non_app_user=False,
-                    )
-                    chat.save()
-                    print(f"✅ Created new app user chat: {new_chat_id} between {device_id} and {receiver_id}")
-                    
-                    # Ensure both devices join the chat room immediately
-                    # Sender already in this function's session, but ensure they join
-                    join_room(f'chat_{new_chat_id}')
-                    
-                    # Try to make receiver join chat room (if they're connected)
-                    if receiver_actual_device_id:
-                        # Emit join_chat event to receiver via their device room
-                        socketio_instance.emit('join_chat', {'chatId': str(new_chat_id)}, room=f'device_{receiver_actual_device_id}')
-                        print(f"📥 Notified receiver via device room to join chat: chat_{new_chat_id}")
-                    if receiver_unique_code:
-                        # Also notify via code room
-                        socketio_instance.emit('join_chat', {'chatId': str(new_chat_id)}, room=f'code_{receiver_unique_code}')
-                        print(f"📥 Notified receiver via code room to join chat: chat_{new_chat_id}")
-                elif phone_number or contact_name:
-                    # Non-app user chat
-                    import uuid
-                    new_chat_id = str(uuid.uuid4())
-                    chat = Chat(
-                        id=new_chat_id,
-                        user1_id=device_id,
-                        user2_id=None,
-                        contact_phone_number=phone_number,
-                        contact_name=contact_name,
-                        contact_email=contact_email,
-                        is_non_app_user=True,
-                    )
-                    chat.save()
-                    print(f"✅ Created new non-app user chat: {new_chat_id} with {contact_name or phone_number}")
-                else:
-                    error_msg = 'Chat not found and cannot create without contact info'
-                    print(f"❌ {error_msg}")
-                    if callback:
-                        callback({'error': error_msg})
-                    return {'error': error_msg}
+            # Ensure both devices join the chat room immediately
+            join_room(f'chat_{chat_id_str}')
             
-            # Verify device is part of chat
-            if chat.user1_id != device_id and chat.user2_id != device_id:
-                error_msg = 'Chat not found or access denied'
-                print(f"❌ {error_msg}: device {device_id} not in chat {chat.id}")
-                if callback:
-                    callback({'error': error_msg})
-                return {'error': error_msg}
+            # Notify receiver to join chat room (if connected)
+            if receiver_actual_device_id and receiver_actual_device_id != receiver_unique_code:
+                socketio_instance.emit('join_chat', {'chatId': chat_id_str}, room=f'device_{receiver_actual_device_id}')
+                print(f"📥 Notified receiver via device room to join chat: {chat_id_str}")
+            if receiver_unique_code:
+                socketio_instance.emit('join_chat', {'chatId': chat_id_str}, room=f'code_{receiver_unique_code}')
+                print(f"📥 Notified receiver via code room to join chat: {chat_id_str}")
             
-            # Determine receiver - SIMPLIFIED
+            # Receiver info
+            receiver_phone_number = phone_number
+            receiver_name = contact_name
             receiver_unique_code = data.get('receiverUniqueCode')  # From QR code - PRIMARY
             receiver_device_id_from_data = data.get('receiverId')  # From frontend
-            
-            if chat.is_non_app_user:
-                # Non-app user chat
-                receiver_id = None
-                receiver_phone_number = chat.contact_phone_number
-                receiver_name = chat.contact_name
-                receiver_unique_code = None
-            else:
-                # App user chat
-                receiver_id_from_chat = chat.user2_id if chat.user1_id == device_id else chat.user1_id
-                receiver_id = receiver_id_from_chat
-                receiver_phone_number = None
-                receiver_name = None
             
             # Get additional message data
             file_name = data.get('fileName')

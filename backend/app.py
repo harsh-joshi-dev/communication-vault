@@ -62,16 +62,27 @@ def init_mongodb():
                     else:
                         uri_with_db = uri + '/' + db_name
             
-            # Connect using mongoengine
-            # Use the URI directly as host parameter
+            # Connect using mongoengine - CONNECT IMMEDIATELY (not lazy)
+            print(f"🔌 Attempting to connect to MongoDB...")
+            print(f"   URI: {uri.split('@')[1] if '@' in uri else 'hidden'}")
+            print(f"   Database: {db_name}")
+            
             connect(
                 db=db_name,
                 host=uri_with_db,
                 alias='default',
-                connect=False,  # Lazy connection - connect on first use
+                connect=True,  # Connect immediately (not lazy)
+                serverSelectionTimeoutMS=10000,  # 10 second timeout
             )
-            print(f"✅ MongoDB connection initialized for database: {db_name}")
-            print(f"   URI: {uri.split('@')[1] if '@' in uri else 'hidden'}")
+            
+            # Test the connection by pinging MongoDB
+            from mongoengine import get_db
+            db = get_db()
+            db.command('ping')
+            
+            print(f"✅ MongoDB connection successful!")
+            print(f"   Database '{db_name}' is connected and ready")
+            print(f"   Collections will be created automatically on first use")
             return True
         except Exception as e:
             retry_count += 1
