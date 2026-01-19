@@ -163,13 +163,15 @@ class ChatService {
   private setupEventListeners(): void {
     if (!this.socket) return;
 
-    // New message received
+    // New message received - CRITICAL: This must work for messages to appear
     this.socket.on('new_message', async (messageData: any) => {
       try {
-        console.log('📥 Received new message:', {
+        console.log('📥 📥 📥 RECEIVED NEW MESSAGE!', {
           id: messageData.id || messageData._id,
           chatId: messageData.chatId || messageData.chat_id,
           senderId: messageData.senderId || messageData.sender_id,
+          receiverId: messageData.receiverId || messageData.receiver_id,
+          content: messageData.content?.substring(0, 50),
           type: messageData.type,
         });
         
@@ -195,17 +197,25 @@ class ChatService {
           createdAt: messageData.createdAt || messageData.created_at || new Date().toISOString(),
         };
 
+        // Check if this is a message for current device
+        const deviceInfo = await deviceService.getDeviceInfo();
+        const isForMe = message.receiverId === deviceInfo.deviceId || 
+                       message.receiverId === deviceInfo.uniqueCode ||
+                       message.senderId !== deviceInfo.deviceId;
+        
+        console.log(`📥 Message is for me: ${isForMe} (receiver: ${message.receiverId}, my deviceId: ${deviceInfo.deviceId}, my code: ${deviceInfo.uniqueCode})`);
+
         // Ensure we're joined to the chat room for this message
         if (message.chatId && this.socket?.connected && this.isAuthenticated) {
           await this.joinChat(message.chatId);
           console.log('✅ Joined chat room for received message:', message.chatId);
         }
 
-        // Save to local storage
+        // Save to local storage (ALWAYS, even if duplicate)
         await messageStorageService.saveMessage(message);
         console.log('✅ Message saved locally');
 
-        // Update chat with new message (updateChatWithMessage already handles unread count)
+        // Update chat with new message
         try {
           const {chatStorageService} = await import('./ChatStorageService');
           await chatStorageService.updateChatWithMessage(message.chatId, message);
@@ -214,16 +224,30 @@ class ChatService {
           console.error('❌ Error updating chat:', error);
         }
 
-        // Notify listeners
-        this.messageListeners.forEach(listener => listener(message));
-        console.log('✅ Message listeners notified');
+        // ALWAYS notify listeners (they handle duplicate checking)
+        console.log(`📢 Notifying ${this.messageListeners.length} message listener(s)`);
+        this.messageListeners.forEach((listener, index) => {
+          try {
+            listener(message);
+            console.log(`✅ Listener ${index} notified`);
+          } catch (error) {
+            console.error(`❌ Listener ${index} error:`, error);
+          }
+        });
         
         // Notify chat listeners
         this.chatListeners.forEach(listener => {
-          // We'll update chat in the listener if needed
+          try {
+            listener({} as Chat); // Chat listeners will handle update
+          } catch (error) {
+            console.error('Chat listener error:', error);
+          }
         });
+        
+        console.log('✅ All listeners notified successfully');
       } catch (error: any) {
-        console.error('❌ Error handling new message:', error);
+        console.error('❌ CRITICAL: Error handling new message:', error);
+        console.error('Error stack:', error.stack);
       }
     });
 

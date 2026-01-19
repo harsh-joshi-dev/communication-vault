@@ -71,11 +71,13 @@ const ChatDetailScreen: React.FC = () => {
     // Load messages immediately when screen opens (like WhatsApp)
     loadMessages();
     
+    // Setup message listener FIRST (before connecting) so we don't miss messages
+    const messageUnsubscribe = setupMessageListener();
+    
     // Connect chat service with device ID
     chatService.connect().then(() => {
-      console.log('Chat service connected successfully');
-      // After connection, setup listeners and join chat
-      setupMessageListener();
+      console.log('✅ Chat service connected successfully');
+      // After connection, setup other listeners and join chat
       setupTypingListener();
       setupStatusUpdateListener();
       joinChat();
@@ -83,12 +85,11 @@ const ChatDetailScreen: React.FC = () => {
       // Reload messages after connection to get any new ones
       loadMessages();
     }).catch((error) => {
-      console.error('Failed to connect chat service:', error);
+      console.error('❌ Failed to connect chat service:', error);
       // Still show old messages even if connection fails
       // Retry connection after a delay
       setTimeout(() => {
         chatService.connect().then(() => {
-          setupMessageListener();
           setupTypingListener();
           setupStatusUpdateListener();
           joinChat();
@@ -101,7 +102,10 @@ const ChatDetailScreen: React.FC = () => {
     chatStorageService.markChatAsRead(chatId);
 
     return () => {
-      chatService.onMessage(() => {})(); // Cleanup
+      // Cleanup message listener
+      if (messageUnsubscribe) {
+        messageUnsubscribe();
+      }
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
       }
@@ -236,44 +240,80 @@ const ChatDetailScreen: React.FC = () => {
   };
 
   const setupMessageListener = () => {
-    chatService.onMessage((message: Message) => {
-      if (message.chatId === chatId) {
-        if (message.isDeleted) {
-          // Remove deleted message from UI (immediate update)
-          setMessages(prev => prev.filter(msg => msg.id !== message.id));
-          return;
-        }
-        
-        // Optimistic UI update (immediate, non-blocking)
-        setMessages(prev => {
-          // Check if message already exists (avoid duplicates)
-          const exists = prev.find(msg => msg.id === message.id);
-          if (exists) {
-            // Update existing message
-            return prev.map(msg => msg.id === message.id ? message : msg);
-          }
-          // Add new message and sort
-          const updated = [...prev, message].sort((a, b) => 
-            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-          );
-          return updated;
-        });
-        
-        // Scroll to bottom immediately
-        requestAnimationFrame(() => scrollToBottom());
-        
-        // Update chat storage (non-blocking for speed)
-        // Don't increment unread count since chat screen is open
-        chatStorageService.updateChatWithMessage(chatId, message, false).catch(err => 
-          console.error('Error updating chat:', err)
-        );
-        
-        // Mark messages as read when chat screen is open
-        chatService.markAsRead(chatId, [message.id]).catch(err => 
-          console.error('Error marking as read:', err)
-        );
+    const unsubscribe = chatService.onMessage(async (message: Message) => {
+      console.log('📨 Message listener received:', {
+        messageChatId: message.chatId,
+        currentChatId: chatId,
+        senderId: message.senderId,
+        receiverId: message.receiverId,
+        content: message.content?.substring(0, 30),
+      });
+      
+      // Check if message is for this chat
+      // Also check if sender/receiver match (in case chatId changed)
+      const deviceInfo = await deviceService.getDeviceInfo();
+      const isFromReceiver = message.senderId === receiverId || message.senderId === receiverUniqueCode;
+      const isToMe = message.receiverId === deviceInfo.deviceId || message.receiverId === deviceInfo.uniqueCode || !message.receiverId;
+      const matchesChat = message.chatId === chatId || 
+                         (message.chatId && chatId && (
+                           message.chatId.replace('chat_', '') === chatId.replace('chat_', '')
+                         ));
+      
+      // Show message if:
+      // 1. ChatId matches, OR
+      // 2. Message is from/to the receiver we're chatting with
+      const shouldShow = matchesChat || (isFromReceiver && isToMe);
+      
+      if (!shouldShow) {
+        console.log('⚠️ Message not for this chat, ignoring');
+        return;
       }
+      
+      console.log('✅ Message is for this chat, displaying it');
+      
+      // Update chatId if server sent different one
+      if (message.chatId && message.chatId !== chatId) {
+        console.log(`📝 Updating chatId: ${chatId} -> ${message.chatId}`);
+        // Update route params if possible (future improvement)
+      }
+      
+      if (message.isDeleted) {
+        setMessages(prev => prev.filter(msg => msg.id !== message.id));
+        return;
+      }
+      
+      // Update messages list
+      setMessages(prev => {
+        const exists = prev.find(msg => msg.id === message.id);
+        if (exists) {
+          // Update existing
+          return prev.map(msg => msg.id === message.id ? message : msg);
+        }
+        // Add new message
+        const updated = [...prev, message].sort((a, b) => 
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+        console.log(`✅ Added message to list. Total: ${updated.length}`);
+        return updated;
+      });
+      
+      // Scroll to bottom
+      setTimeout(() => scrollToBottom(true), 100);
+      
+      // Update chat storage
+      const messageChatId = message.chatId || chatId;
+      chatStorageService.updateChatWithMessage(messageChatId, message, false).catch(err => 
+        console.error('Error updating chat:', err)
+      );
+      
+      // Mark as read
+      chatService.markAsRead(messageChatId, [message.id]).catch(err => 
+        console.error('Error marking as read:', err)
+      );
     });
+    
+    // Store unsubscribe function for cleanup
+    return unsubscribe;
   };
 
   const scrollToBottom = (animated: boolean = true) => {
