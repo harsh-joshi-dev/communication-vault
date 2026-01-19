@@ -195,6 +195,11 @@ class ChatService {
           createdAt: messageData.createdAt || messageData.created_at || new Date().toISOString(),
         };
 
+        // Ensure we're joined to the chat room for this message
+        if (message.chatId && this.socket?.connected && this.isAuthenticated) {
+          await this.joinChat(message.chatId);
+        }
+
         // Save to local storage
         await messageStorageService.saveMessage(message);
         console.log('✅ Message saved locally');
@@ -217,7 +222,7 @@ class ChatService {
           // We'll update chat in the listener if needed
         });
       } catch (error: any) {
-        console.error('Error handling new message:', error);
+        console.error('❌ Error handling new message:', error);
       }
     });
 
@@ -426,10 +431,33 @@ class ChatService {
             const serverMessage: Message = {
               ...message,
               id: response.message.id || response.message._id || message.id,
-              status: 'sent',
+              chatId: response.message.chatId || response.message.chat_id || message.chatId,
+              status: response.message.status || 'sent',
               sentAt: response.message.sentAt || response.message.sent_at || message.sentAt,
+              deliveredAt: response.message.deliveredAt || response.message.delivered_at,
             };
+            
+            // Update chatId if server returned a different one (chat was created)
+            if (serverMessage.chatId !== chatId) {
+              console.log(`📝 Chat ID updated: ${chatId} -> ${serverMessage.chatId}`);
+              // Join the new chat room
+              await this.joinChat(serverMessage.chatId);
+              // Update message's chatId
+              serverMessage.chatId = serverMessage.chatId;
+            }
+            
             await messageStorageService.saveMessage(serverMessage);
+            
+            // Update chat storage with new chatId if changed
+            if (serverMessage.chatId !== chatId) {
+              try {
+                const {chatStorageService} = await import('./ChatStorageService');
+                await chatStorageService.updateChatId(chatId, serverMessage.chatId);
+              } catch (error) {
+                console.error('Error updating chat ID:', error);
+              }
+            }
+            
             resolve(serverMessage);
           } else {
             // No error but no message - assume success
@@ -516,6 +544,30 @@ class ChatService {
   async sendTypingIndicator(chatId: string, isTyping: boolean): Promise<void> {
     if (this.socket?.connected && this.isAuthenticated) {
       this.socket.emit('typing', {chatId, isTyping});
+    }
+  }
+
+  /**
+   * Get messages for a chat from local storage
+   * This loads the chat history when opening a chat (like WhatsApp)
+   */
+  async getMessages(chatId: string): Promise<Message[]> {
+    try {
+      // Load messages from local storage
+      const messages = await messageStorageService.getMessages(chatId);
+      
+      // Filter out deleted messages
+      const visibleMessages = messages.filter(msg => !msg.isDeleted);
+      
+      // Sort by createdAt (oldest first) - WhatsApp style
+      return visibleMessages.sort((a, b) => {
+        const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
+        const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
+        return dateA - dateB;
+      });
+    } catch (error) {
+      console.error('Error getting messages:', error);
+      return [];
     }
   }
 }

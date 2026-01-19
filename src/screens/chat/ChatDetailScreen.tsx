@@ -12,7 +12,7 @@ import {
   Alert,
   StatusBar,
 } from 'react-native';
-import {useRoute, useNavigation} from '@react-navigation/native';
+import {useRoute, useNavigation, useFocusEffect} from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/Ionicons';
 import {Message} from '../../types';
 import {format} from 'date-fns';
@@ -54,9 +54,22 @@ const ChatDetailScreen: React.FC = () => {
   const flatListRef = useRef<FlatList>(null);
   const audioRecorderPlayer = useRef(new AudioRecorderPlayer()).current;
 
+  // Reload messages when screen comes into focus (like WhatsApp)
+  useFocusEffect(
+    React.useCallback(() => {
+      // Load messages every time screen is focused
+      loadMessages();
+      // Mark chat as read when opening
+      chatStorageService.markChatAsRead(chatId);
+    }, [chatId])
+  );
+
   useEffect(() => {
     // Get current device ID
     deviceService.getDeviceId().then(id => setCurrentDeviceId(id));
+    
+    // Load messages immediately when screen opens (like WhatsApp)
+    loadMessages();
     
     // Connect chat service with device ID
     chatService.connect().then(() => {
@@ -66,8 +79,12 @@ const ChatDetailScreen: React.FC = () => {
       setupTypingListener();
       setupStatusUpdateListener();
       joinChat();
+      
+      // Reload messages after connection to get any new ones
+      loadMessages();
     }).catch((error) => {
       console.error('Failed to connect chat service:', error);
+      // Still show old messages even if connection fails
       // Retry connection after a delay
       setTimeout(() => {
         chatService.connect().then(() => {
@@ -75,15 +92,13 @@ const ChatDetailScreen: React.FC = () => {
           setupTypingListener();
           setupStatusUpdateListener();
           joinChat();
+          loadMessages();
         }).catch(err => console.error('Retry connection failed:', err));
       }, 3000);
     });
     
     // Mark chat as read when opening
     chatStorageService.markChatAsRead(chatId);
-    
-    // Load messages
-    loadMessages();
 
     return () => {
       chatService.onMessage(() => {})(); // Cleanup
@@ -101,7 +116,7 @@ const ChatDetailScreen: React.FC = () => {
         audioRecorderPlayer.stopPlayer();
       }
     };
-  }, []);
+  }, [chatId]); // Reload when chatId changes
 
   const joinChat = async () => {
     if (chatId) {
@@ -197,15 +212,26 @@ const ChatDetailScreen: React.FC = () => {
 
   const loadMessages = async () => {
     try {
+      console.log('📥 Loading messages for chat:', chatId);
       const msgs = await chatService.getMessages(chatId);
-      // Filter out deleted messages and sort
-      const visibleMessages = msgs
-        .filter(msg => !msg.isDeleted)
-        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-      setMessages(visibleMessages);
-      scrollToBottom();
+      console.log(`✅ Loaded ${msgs.length} message(s) from storage`);
+      
+      // Messages are already sorted and filtered by getMessages (oldest to newest)
+      // Set messages - WhatsApp style: oldest at top, newest at bottom
+      setMessages(msgs);
+      
+      // Scroll to bottom (newest messages) after messages are set
+      // Use multiple attempts to ensure scroll works
+      setTimeout(() => {
+        scrollToBottom(false); // No animation on initial load for speed
+      }, 50);
+      setTimeout(() => {
+        scrollToBottom(true); // Animated scroll as backup
+      }, 200);
     } catch (error) {
-      console.error('Error loading messages:', error);
+      console.error('❌ Error loading messages:', error);
+      // Still set empty array so UI doesn't break
+      setMessages([]);
     }
   };
 
@@ -250,10 +276,12 @@ const ChatDetailScreen: React.FC = () => {
     });
   };
 
-  const scrollToBottom = () => {
+  const scrollToBottom = (animated: boolean = true) => {
     // Use requestAnimationFrame for ultra-smooth scrolling
     requestAnimationFrame(() => {
-      flatListRef.current?.scrollToEnd({animated: true});
+      if (flatListRef.current && messages.length > 0) {
+        flatListRef.current.scrollToEnd({animated});
+      }
     });
   };
 
@@ -877,7 +905,18 @@ const ChatDetailScreen: React.FC = () => {
               renderItem={renderMessage}
               keyExtractor={item => item.id}
               contentContainerStyle={styles.messagesList}
-              onContentSizeChange={scrollToBottom}
+              onContentSizeChange={() => {
+                // Scroll to bottom when new messages are added (WhatsApp style)
+                if (messages.length > 0) {
+                  scrollToBottom(true);
+                }
+              }}
+              onLayout={() => {
+                // Scroll to bottom when layout changes (initial load)
+                if (messages.length > 0) {
+                  scrollToBottom(false);
+                }
+              }}
             />
             {isTyping && typingUser && (
               <View style={styles.typingIndicator}>

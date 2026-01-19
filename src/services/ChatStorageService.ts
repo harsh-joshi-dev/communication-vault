@@ -104,6 +104,37 @@ class ChatStorageService {
   }
 
   /**
+   * Update chat ID (when server creates a new chat with UUID)
+   */
+  async updateChatId(oldChatId: string, newChatId: string): Promise<void> {
+    try {
+      const chats = await this.getChats();
+      const chatIndex = chats.findIndex(chat => chat.id === oldChatId);
+      
+      if (chatIndex >= 0) {
+        chats[chatIndex].id = newChatId;
+        chats[chatIndex].updatedAt = new Date().toISOString();
+        await this.saveChats(chats);
+        
+        // Also update messages storage key if needed
+        try {
+          const oldMessagesKey = `${ChatStorageService.MESSAGES_KEY_PREFIX}${oldChatId}`;
+          const newMessagesKey = `${ChatStorageService.MESSAGES_KEY_PREFIX}${newChatId}`;
+          const messagesJson = await EncryptedStorage.getItem(oldMessagesKey);
+          if (messagesJson) {
+            await EncryptedStorage.setItem(newMessagesKey, messagesJson);
+            await EncryptedStorage.removeItem(oldMessagesKey);
+          }
+        } catch (error) {
+          console.error('Error updating messages storage key:', error);
+        }
+      }
+    } catch (error) {
+      console.error('Error updating chat ID:', error);
+    }
+  }
+
+  /**
    * Update chat with last message
    */
   async updateChatWithMessage(chatId: string, message: Message, incrementUnread: boolean = true): Promise<void> {

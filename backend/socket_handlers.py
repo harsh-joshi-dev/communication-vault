@@ -102,6 +102,7 @@ def register_socket_handlers(socketio_instance):
             chat_id = data.get('chatId')
             
             if not device_id or not chat_id:
+                print(f"⚠️ Join chat failed: device_id={device_id}, chat_id={chat_id}")
                 return
             
             # Handle different room types
@@ -110,23 +111,49 @@ def register_socket_handlers(socketio_instance):
                 room_device_id = chat_id.replace('device_', '')
                 if room_device_id == device_id:
                     join_room(chat_id)
-                    print(f"Device {device_id} joined device room {chat_id}")
+                    print(f"✅ Device {device_id} joined device room {chat_id}")
+                else:
+                    print(f"⚠️ Device {device_id} cannot join other device room {chat_id}")
             elif chat_id.startswith('code_'):
                 # Code room - allow joining own code room
                 room_code = chat_id.replace('code_', '')
                 unique_code = session_data.get('unique_code') or getattr(request, 'sid_unique_code', None)
                 if room_code == unique_code:
                     join_room(chat_id)
-                    print(f"Device {device_id} joined code room {chat_id}")
+                    print(f"✅ Device {device_id} joined code room {chat_id}")
+                else:
+                    print(f"⚠️ Device {device_id} cannot join code room {chat_id} (has {unique_code})")
             else:
                 # Regular chat room - verify device is part of chat
-                chat = Chat.objects(id=chat_id).first()
-                if chat and (chat.user1_id == device_id or chat.user2_id == device_id):
-                    join_room(f'chat_{chat_id}')
-                    emit('joined_chat', {'chatId': chat_id})
-                    print(f"Device {device_id} joined chat {chat_id}")
+                # Handle both UUID and prefixed formats
+                clean_chat_id = chat_id.replace('chat_', '') if chat_id.startswith('chat_') else chat_id
+                
+                try:
+                    chat = Chat.objects(id=clean_chat_id).first()
+                    if chat:
+                        # Verify device is part of chat
+                        if chat.user1_id == device_id or chat.user2_id == device_id:
+                            room_name = f'chat_{chat.id}'
+                            join_room(room_name)
+                            emit('joined_chat', {'chatId': str(chat.id)})
+                            print(f"✅ Device {device_id} joined chat room {room_name} (chat ID: {chat.id})")
+                        else:
+                            print(f"⚠️ Device {device_id} not authorized for chat {chat.id}")
+                    else:
+                        # Chat doesn't exist yet - this is OK, it will be created when first message is sent
+                        print(f"⚠️ Chat {clean_chat_id} not found, but allowing join (will be created on first message)")
+                        # Still join the room so messages can be received when chat is created
+                        room_name = f'chat_{clean_chat_id}'
+                        join_room(room_name)
+                        emit('joined_chat', {'chatId': clean_chat_id})
+                except Exception as e:
+                    print(f"⚠️ Error finding chat {clean_chat_id}: {e}")
+                    # Still try to join the room
+                    room_name = f'chat_{clean_chat_id}'
+                    join_room(room_name)
+                    emit('joined_chat', {'chatId': clean_chat_id})
         except Exception as e:
-            print(f"Join chat error: {e}")
+            print(f"❌ Join chat error: {e}")
             import traceback
             traceback.print_exc()
     
@@ -149,7 +176,7 @@ def register_socket_handlers(socketio_instance):
             print(f"Leave chat error: {e}")
     
     @socketio_instance.on('send_message')
-    def handle_send_message(data):
+    def handle_send_message(data, callback=None):
         """Handle real-time message sending"""
         try:
             from flask import request
@@ -163,6 +190,8 @@ def register_socket_handlers(socketio_instance):
                 print(f"❌ Send message failed: device_id not found. Socket ID: {request.sid}")
                 print(f"   Session data: {device_sessions.get(request.sid, 'Not found')}")
                 print(f"   Available sessions: {list(device_sessions.keys())}")
+                if callback:
+                    callback({'error': 'Not authenticated'})
                 return {'error': 'Not authenticated'}
             
             print(f"📤 Processing message from device {device_id} (Socket: {request.sid})")
@@ -178,10 +207,13 @@ def register_socket_handlers(socketio_instance):
             # Get or create chat
             chat = None
             if chat_id:
-                # Try to find by ID first
+                # Try to find by ID first (handle both UUID and prefixed formats)
                 try:
-                    chat = Chat.objects(id=chat_id).first()
-                except:
+                    # Remove 'chat_' prefix if present
+                    clean_chat_id = chat_id.replace('chat_', '') if chat_id.startswith('chat_') else chat_id
+                    chat = Chat.objects(id=clean_chat_id).first()
+                except Exception as e:
+                    print(f"Error finding chat by ID {chat_id}: {e}")
                     pass
             
             if not chat:
@@ -192,13 +224,21 @@ def register_socket_handlers(socketio_instance):
                 if receiver_device_id:
                     # Try to find chat between these two devices
                     chat = Chat.objects(
-                        (Chat.user1_id == device_id) & (Chat.user2_id == receiver_device_id)
-                        | (Chat.user1_id == receiver_device_id) & (Chat.user2_id == device_id)
+                        ((Chat.user1_id == device_id) & (Chat.user2_id == receiver_device_id)) |
+                        ((Chat.user1_id == receiver_device_id) & (Chat.user2_id == device_id))
+                    ).first()
+                
+                # If not found by device ID, try by unique code
+                if not chat and receiver_unique_code:
+                    # Try finding by unique code (stored as user2_id for app users)
+                    chat = Chat.objects(
+                        ((Chat.user1_id == device_id) & (Chat.user2_id == receiver_unique_code)) |
+                        ((Chat.user1_id == receiver_unique_code) & (Chat.user2_id == device_id))
                     ).first()
                 
                 # If not found by device ID, try by unique code (if we have a way to map it)
                 # For now, we'll use receiver_device_id or receiverUniqueCode as receiver_id
-                elif phone_number:
+                if not chat and phone_number:
                     chat = Chat.objects(
                         user1_id=device_id,
                         contact_phone_number=phone_number,
@@ -224,6 +264,7 @@ def register_socket_handlers(socketio_instance):
                         is_non_app_user=False,
                     )
                     chat.save()
+                    print(f"✅ Created new app user chat: {new_chat_id} between {device_id} and {receiver_id}")
                 elif phone_number or contact_name:
                     # Non-app user chat
                     import uuid
@@ -238,12 +279,21 @@ def register_socket_handlers(socketio_instance):
                         is_non_app_user=True,
                     )
                     chat.save()
+                    print(f"✅ Created new non-app user chat: {new_chat_id} with {contact_name or phone_number}")
                 else:
-                    return {'error': 'Chat not found and cannot create without contact info'}
+                    error_msg = 'Chat not found and cannot create without contact info'
+                    print(f"❌ {error_msg}")
+                    if callback:
+                        callback({'error': error_msg})
+                    return {'error': error_msg}
             
             # Verify device is part of chat
             if chat.user1_id != device_id and chat.user2_id != device_id:
-                return {'error': 'Chat not found'}
+                error_msg = 'Chat not found or access denied'
+                print(f"❌ {error_msg}: device {device_id} not in chat {chat.id}")
+                if callback:
+                    callback({'error': error_msg})
+                return {'error': error_msg}
             
             # Determine receiver
             if chat.is_non_app_user:
@@ -286,6 +336,7 @@ def register_socket_handlers(socketio_instance):
             )
             
             message.save()
+            print(f"✅ Message saved: {message.id} in chat {chat.id}")
             
             # Update chat
             chat.last_message_id = str(message.id)
@@ -303,18 +354,29 @@ def register_socket_handlers(socketio_instance):
             # Emit to all relevant rooms simultaneously for ultra-fast delivery
             message_dict = message.to_dict()
             
+            # Ensure both sender and receiver join the chat room
+            # Join sender to chat room
+            join_room(f'chat_{chat.id}')
+            
             # Emit to chat room (both sender and receiver)
             socketio_instance.emit('new_message', message_dict, room=f'chat_{chat.id}')
+            print(f"📤 Emitted to chat room: chat_{chat.id}")
             
             # Also notify receiver directly via device room (ensures delivery even if not in chat room)
             if receiver_id:
                 socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_id}')
+                print(f"📤 Emitted to device room: device_{receiver_id}")
+                
                 # Also emit to unique code room if we have receiverUniqueCode
                 receiver_unique_code = data.get('receiverUniqueCode')
                 if receiver_unique_code:
                     socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_unique_code}')
+                    print(f"📤 Emitted to code room: code_{receiver_unique_code}")
+                
                 # Also try emitting to receiver_id as code room (in case it's a unique code)
-                socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_id}')
+                if receiver_id != receiver_unique_code:  # Avoid duplicate emission
+                    socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_id}')
+                    print(f"📤 Emitted to code room (receiver_id): code_{receiver_id}")
                 
                 # Mark as delivered immediately (optimistic)
                 message.status = 'delivered'
@@ -331,15 +393,23 @@ def register_socket_handlers(socketio_instance):
             
             # Also send message back to sender (so they see it in their chat immediately)
             socketio_instance.emit('new_message', message_dict, room=f'device_{device_id}')
+            print(f"📤 Emitted to sender device room: device_{device_id}")
             
-            # Return success response immediately
-            return {'message': message_dict}
+            # Return success response via callback if provided
+            response = {'message': message_dict}
+            if callback:
+                callback(response)
+            print(f"✅ Message sent successfully: {message.id}")
+            return response
             
         except Exception as e:
-            print(f"Send message error: {e}")
+            error_msg = str(e)
+            print(f"❌ Send message error: {error_msg}")
             import traceback
             traceback.print_exc()
-            return {'error': str(e)}
+            if callback:
+                callback({'error': error_msg})
+            return {'error': error_msg}
     
     @socketio_instance.on('typing')
     def handle_typing(data):
