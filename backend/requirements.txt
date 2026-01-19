@@ -10,7 +10,7 @@ werkzeug==3.0.1
 
 dnspython==2.6.1
 pymongo==4.10.1
-mongoengine==0.31.0
+mongoengine==0.29.1
 pymongo[srv]==4.10.1
 
 python-socketio==5.10.0
