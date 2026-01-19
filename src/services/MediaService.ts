@@ -2,12 +2,7 @@ import axios from 'axios';
 import {Platform} from 'react-native';
 
 const getApiBaseUrl = () => {
-  if (__DEV__) {
-    if (Platform.OS === 'android') {
-      return 'http://192.168.1.16:5001/api';
-    }
-    return 'http://localhost:5001/api';
-  }
+  // Always use production URL for reliability
   return 'https://communication-vault.onrender.com/api';
 };
 

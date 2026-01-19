@@ -399,13 +399,28 @@ def register_socket_handlers(socketio_instance):
             
             # Try to find receiver's actual deviceId from active connections by uniqueCode
             receiver_actual_device_id = receiver_id
+            receiver_device_id_from_data = data.get('receiverId')
+            
+            # Priority 1: If receiverUniqueCode is provided, find device by uniqueCode
             if receiver_unique_code:
                 # Look through active sessions to find device with this uniqueCode
                 for sid, session_data in device_sessions.items():
-                    if session_data.get('unique_code') == receiver_unique_code:
+                    session_unique_code = session_data.get('unique_code')
+                    if session_unique_code and session_unique_code == receiver_unique_code:
                         receiver_actual_device_id = session_data.get('device_id')
                         print(f"✅ Found receiver device: {receiver_actual_device_id} for uniqueCode: {receiver_unique_code}")
                         break
+                
+                # If not found by uniqueCode, check if receiver_id from chat is actually a uniqueCode
+                if not receiver_actual_device_id or receiver_actual_device_id == receiver_id:
+                    # Try receiver_id from data if provided
+                    if receiver_device_id_from_data and receiver_device_id_from_data != receiver_unique_code:
+                        # Check if this deviceId exists in active sessions
+                        for sid, session_data in device_sessions.items():
+                            if session_data.get('device_id') == receiver_device_id_from_data:
+                                receiver_actual_device_id = receiver_device_id_from_data
+                                print(f"✅ Found receiver device from data: {receiver_actual_device_id}")
+                                break
             
             # Emit to chat room (both sender and receiver)
             socketio_instance.emit('new_message', message_dict, room=f'chat_{chat.id}')
@@ -413,26 +428,32 @@ def register_socket_handlers(socketio_instance):
             
             # Notify receiver via multiple channels for maximum reliability
             if receiver_id or receiver_unique_code:
-                # Emit to device room (if we have actual deviceId and it looks like a deviceId)
+                # Priority 1: Emit to device room (if we found actual deviceId)
                 if receiver_actual_device_id and receiver_actual_device_id != receiver_unique_code and len(receiver_actual_device_id) > 10:
                     socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_actual_device_id}')
-                    print(f"📤 Emitted to device room: device_{receiver_actual_device_id}")
+                    print(f"📤 [1] Emitted to device room: device_{receiver_actual_device_id}")
                 
-                # ALWAYS emit to unique code room if we have receiverUniqueCode (most reliable for QR codes)
+                # Priority 2: ALWAYS emit to unique code room if we have receiverUniqueCode (MOST RELIABLE for QR codes)
                 if receiver_unique_code:
                     socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_unique_code}')
-                    print(f"📤 Emitted to code room: code_{receiver_unique_code}")
+                    print(f"📤 [2] Emitted to code room: code_{receiver_unique_code} (PRIMARY for QR codes)")
                 
-                # Also try receiver_id as device room (in case it's a deviceId)
-                if receiver_id and receiver_id != receiver_unique_code:
+                # Priority 3: Also try receiver_id from data as device room (if it's a deviceId)
+                if receiver_device_id_from_data and receiver_device_id_from_data != receiver_unique_code:
+                    if len(receiver_device_id_from_data) > 10:
+                        socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_device_id_from_data}')
+                        print(f"📤 [3] Emitted to device room (from data): device_{receiver_device_id_from_data}")
+                
+                # Priority 4: Also try receiver_id from chat (in case it's a deviceId)
+                if receiver_id and receiver_id != receiver_unique_code and receiver_id != receiver_actual_device_id:
                     # Check if it looks like a deviceId (long UUID) vs uniqueCode (short)
                     if len(receiver_id) > 10:
                         socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_id}')
-                        print(f"📤 Emitted to device room (receiver_id): device_{receiver_id}")
+                        print(f"📤 [4] Emitted to device room (from chat): device_{receiver_id}")
                     else:
                         # It might be a uniqueCode
                         socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_id}')
-                        print(f"📤 Emitted to code room (receiver_id as code): code_{receiver_id}")
+                        print(f"📤 [4] Emitted to code room (receiver_id as code): code_{receiver_id}")
                 
                 # Mark as delivered immediately (optimistic)
                 message.status = 'delivered'
