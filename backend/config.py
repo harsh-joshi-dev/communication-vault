@@ -13,8 +13,8 @@ class Config:
     
     # Database - MongoDB
     # Get URI from environment, with proper encoding for special characters
-    # Default connection string for F2D cluster
-    _mongodb_uri = os.environ.get('MONGODB_URI') or 'mongodb+srv://user:Abc1234@f2d.i5afjk2.mongodb.net/stealth_vault?retryWrites=true&w=majority'
+    # Default connection string for ClusterOne cluster
+    _mongodb_uri = os.environ.get('MONGODB_URI') or 'mongodb+srv://gauravpadshala08_db_user:mPqNeTCARUoRq92t@clusterone.zksoinv.mongodb.net/stealth_vault?retryWrites=true&w=majority'
     # Ensure URI is properly formatted
     if _mongodb_uri and not _mongodb_uri.startswith('mongodb'):
         _mongodb_uri = f'mongodb+srv://{_mongodb_uri}'

@@ -204,46 +204,58 @@ def register_socket_handlers(socketio_instance):
             contact_name = data.get('contactName')
             contact_email = data.get('email')
             
-            # Get or create chat
+            # Get or create chat - WRAP IN TRY-EXCEPT TO HANDLE MongoDB ERRORS
             chat = None
-            if chat_id:
-                # Try to find by ID first (handle both UUID and prefixed formats)
-                try:
-                    # Remove 'chat_' prefix if present
-                    clean_chat_id = chat_id.replace('chat_', '') if chat_id.startswith('chat_') else chat_id
-                    chat = Chat.objects(id=clean_chat_id).first()
-                except Exception as e:
-                    print(f"Error finding chat by ID {chat_id}: {e}")
-                    pass
+            mongo_available = True
             
-            if not chat:
-                # Try to find existing chat by phone number, device ID, or unique code
-                receiver_device_id = data.get('receiverId')  # This is now deviceId
-                receiver_unique_code = data.get('receiverUniqueCode')  # Also check unique code
+            try:
+                if chat_id:
+                    # Try to find by ID first (handle both UUID and prefixed formats)
+                    try:
+                        # Remove 'chat_' prefix if present
+                        clean_chat_id = chat_id.replace('chat_', '') if chat_id.startswith('chat_') else chat_id
+                        chat = Chat.objects(id=clean_chat_id).first()
+                    except Exception as e:
+                        print(f"⚠️ Error finding chat by ID {chat_id}: {e}")
+                        mongo_available = False
+                        pass
                 
-                if receiver_device_id:
-                    # Try to find chat between these two devices
-                    chat = Chat.objects(
-                        ((Chat.user1_id == device_id) & (Chat.user2_id == receiver_device_id)) |
-                        ((Chat.user1_id == receiver_device_id) & (Chat.user2_id == device_id))
-                    ).first()
-                
-                # If not found by device ID, try by unique code
-                if not chat and receiver_unique_code:
-                    # Try finding by unique code (stored as user2_id for app users)
-                    chat = Chat.objects(
-                        ((Chat.user1_id == device_id) & (Chat.user2_id == receiver_unique_code)) |
-                        ((Chat.user1_id == receiver_unique_code) & (Chat.user2_id == device_id))
-                    ).first()
-                
-                # If not found by device ID, try by unique code (if we have a way to map it)
-                # For now, we'll use receiver_device_id or receiverUniqueCode as receiver_id
-                if not chat and phone_number:
-                    chat = Chat.objects(
-                        user1_id=device_id,
-                        contact_phone_number=phone_number,
-                        is_non_app_user=True
-                    ).first()
+                if not chat:
+                    # Try to find existing chat by phone number, device ID, or unique code
+                    receiver_device_id = data.get('receiverId')  # This is now deviceId
+                    receiver_unique_code = data.get('receiverUniqueCode')  # Also check unique code
+                    
+                    try:
+                        if receiver_device_id:
+                            # Try to find chat between these two devices
+                            chat = Chat.objects(
+                                ((Chat.user1_id == device_id) & (Chat.user2_id == receiver_device_id)) |
+                                ((Chat.user1_id == receiver_device_id) & (Chat.user2_id == device_id))
+                            ).first()
+                        
+                        # If not found by device ID, try by unique code
+                        if not chat and receiver_unique_code:
+                            # Try finding by unique code (stored as user2_id for app users)
+                            chat = Chat.objects(
+                                ((Chat.user1_id == device_id) & (Chat.user2_id == receiver_unique_code)) |
+                                ((Chat.user1_id == receiver_unique_code) & (Chat.user2_id == device_id))
+                            ).first()
+                        
+                        # If not found by device ID, try by unique code (if we have a way to map it)
+                        if not chat and phone_number:
+                            chat = Chat.objects(
+                                user1_id=device_id,
+                                contact_phone_number=phone_number,
+                                is_non_app_user=True
+                            ).first()
+                    except Exception as e:
+                        print(f"⚠️ Error finding chat in MongoDB: {e}")
+                        mongo_available = False
+                        pass
+            except Exception as e:
+                print(f"⚠️ MongoDB connection error, continuing without DB: {e}")
+                mongo_available = False
+                pass
             
             if not chat:
                 # Create new chat
@@ -344,48 +356,33 @@ def register_socket_handlers(socketio_instance):
             auto_delete_after = data.get('autoDeleteAfter')
             thumbnail_url = data.get('thumbnailUrl')
             
-            # Create message with status
-            message = Message(
-                chat_id=str(chat.id),
-                sender_id=device_id,
-                receiver_id=receiver_id,
-                receiver_phone_number=receiver_phone_number,
-                receiver_name=receiver_name,
-                type=message_type,
-                content=content,
-                media_url=media_url,
-                thumbnail_url=thumbnail_url,
-                file_name=file_name,
-                file_size=file_size,
-                duration=duration,
-                is_view_once=is_view_once,
-                auto_delete_after=auto_delete_after,
-                status='sent',  # Message is sent immediately
-                sent_at=datetime.utcnow(),
-            )
+            # CRITICAL: Create message dict FIRST (works without MongoDB)
+            # Deliver message immediately, save to MongoDB after
+            import uuid
+            message_id = str(uuid.uuid4())
+            chat_id_str = str(chat.id) if hasattr(chat, 'id') else chat_id or str(uuid.uuid4())
             
-            message.save()
-            print(f"✅ Message saved: {message.id} in chat {chat.id}")
-            
-            # Update chat
-            chat.last_message_id = str(message.id)
-            chat.updated_at = datetime.utcnow()
-            
-            # Update unread count (only for app users)
-            if receiver_id:
-                if chat.user1_id == receiver_id:
-                    chat.unread_count_user1 += 1
-                else:
-                    chat.unread_count_user2 += 1
-            # For non-app users, we don't track unread count
-            chat.save()
-            
-            # Emit to all relevant rooms simultaneously for ultra-fast delivery
-            message_dict = message.to_dict()
-            
-            # Ensure both sender and receiver join the chat room
-            # Join sender to chat room
-            join_room(f'chat_{chat.id}')
+            # Create message dict for immediate delivery
+            message_dict = {
+                'id': message_id,
+                'chatId': chat_id_str,
+                'senderId': device_id,
+                'receiverId': receiver_id or '',
+                'receiverPhoneNumber': receiver_phone_number,
+                'receiverName': receiver_name,
+                'type': message_type,
+                'content': content,
+                'mediaUrl': media_url,
+                'thumbnailUrl': thumbnail_url,
+                'fileName': file_name,
+                'fileSize': file_size,
+                'duration': duration,
+                'isViewOnce': is_view_once or False,
+                'autoDeleteAfter': auto_delete_after,
+                'status': 'sent',
+                'sentAt': datetime.utcnow().isoformat(),
+                'createdAt': datetime.utcnow().isoformat(),
+            }
             
             # Find receiver's actual deviceId from active connections
             receiver_actual_device_id = None
@@ -404,7 +401,6 @@ def register_socket_handlers(socketio_instance):
             
             # Priority 2: Use receiverId from data if not found
             if not receiver_actual_device_id and receiver_device_id_from_data:
-                # Check if this deviceId is actually connected
                 for sid, session_data in device_sessions.items():
                     if session_data.get('device_id') == receiver_device_id_from_data:
                         receiver_actual_device_id = receiver_device_id_from_data
@@ -413,7 +409,6 @@ def register_socket_handlers(socketio_instance):
             
             # Priority 3: Use receiver_id from chat as fallback
             if not receiver_actual_device_id and receiver_id:
-                # Check if it's a connected deviceId
                 if len(receiver_id) > 10:  # Looks like a deviceId
                     for sid, session_data in device_sessions.items():
                         if session_data.get('device_id') == receiver_id:
@@ -422,12 +417,15 @@ def register_socket_handlers(socketio_instance):
                             break
             
             if not receiver_actual_device_id:
-                print(f"⚠️ Receiver device not found in active connections. Will use code room: code_{receiver_unique_code}")
+                print(f"⚠️ Receiver device not found. Will use code room: code_{receiver_unique_code}")
             
-            # SIMPLIFIED: Emit to ALL possible rooms to ensure delivery
+            # CRITICAL: DELIVER MESSAGE FIRST (works without MongoDB)
+            print(f"🚀 DELIVERING MESSAGE IMMEDIATELY (MongoDB-independent):")
+            join_room(f'chat_{chat_id_str}')
+            
             # 1. Emit to chat room
-            socketio_instance.emit('new_message', message_dict, room=f'chat_{chat.id}')
-            print(f"📤 [1] Emitted to chat room: chat_{chat.id}")
+            socketio_instance.emit('new_message', message_dict, room=f'chat_{chat_id_str}')
+            print(f"   ✅ [1/6] Emitted to chat room: chat_{chat_id_str}")
             
             # 2. Emit to receiver's code room (MOST IMPORTANT - this is where QR code receivers are)
             if receiver_unique_code:
@@ -458,21 +456,69 @@ def register_socket_handlers(socketio_instance):
                     socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_id}')
                     print(f"📤 [5] Emitted to code room (chat): code_{receiver_id}")
             
-            # Send message back to sender (so they see it immediately)
+            # 6. Send to sender
             socketio_instance.emit('new_message', message_dict, room=f'device_{device_id}')
-            print(f"📤 [6] Emitted to sender device room: device_{device_id}")
+            print(f"   ✅ [6/6] Emitted to sender: device_{device_id}")
             
-            # Mark as delivered and notify sender
+            print(f"✅✅✅ MESSAGE DELIVERED! Receiver should receive it now.")
+            
+            # NOW try to save to MongoDB (optional - message already delivered)
+            if mongo_available:
+                try:
+                    message = Message(
+                        id=message_id,
+                        chat_id=chat_id_str,
+                        sender_id=device_id,
+                        receiver_id=receiver_id,
+                        receiver_phone_number=receiver_phone_number,
+                        receiver_name=receiver_name,
+                        type=message_type,
+                        content=content,
+                        media_url=media_url,
+                        thumbnail_url=thumbnail_url,
+                        file_name=file_name,
+                        file_size=file_size,
+                        duration=duration,
+                        is_view_once=is_view_once,
+                        auto_delete_after=auto_delete_after,
+                        status='delivered',
+                        sent_at=datetime.utcnow(),
+                        delivered_at=datetime.utcnow(),
+                    )
+                    message.save()
+                    print(f"✅ Message saved to MongoDB: {message.id}")
+                    
+                    # Update chat (if it's a real MongoDB object)
+                    if hasattr(chat, 'save'):
+                        try:
+                            chat.last_message_id = str(message.id)
+                            chat.updated_at = datetime.utcnow()
+                            if receiver_id:
+                                if chat.user1_id == receiver_id:
+                                    chat.unread_count_user1 += 1
+                                else:
+                                    chat.unread_count_user2 += 1
+                            chat.save()
+                            print(f"✅ Chat updated in MongoDB")
+                        except Exception as e:
+                            print(f"⚠️ Failed to update chat: {e}")
+                    # Update message_dict with saved data
+                    message_dict = message.to_dict()
+                except Exception as e:
+                    print(f"⚠️ Failed to save to MongoDB (message already delivered): {e}")
+            else:
+                print(f"⚠️ MongoDB unavailable - message delivered but not saved")
+            
+            # Send status update to sender
+            message_dict['status'] = 'delivered'
+            message_dict['deliveredAt'] = datetime.utcnow().isoformat()
+            
             if receiver_id or receiver_unique_code:
-                message.status = 'delivered'
-                message.delivered_at = datetime.utcnow()
-                message.save()
-                
                 socketio_instance.emit('message_status_update', {
-                    'messageId': str(message.id),
-                    'chatId': str(chat.id),
+                    'messageId': message_id,
+                    'chatId': chat_id_str,
                     'status': 'delivered',
-                    'deliveredAt': message.delivered_at.isoformat()
+                    'deliveredAt': datetime.utcnow().isoformat()
                 }, room=f'device_{device_id}')
                 print(f"✅ Status update sent to sender")
             
@@ -481,13 +527,14 @@ def register_socket_handlers(socketio_instance):
             if callback:
                 try:
                     callback(response)
-                    print(f"✅ Callback sent successfully for message {message.id}")
+                    print(f"✅ Callback sent successfully for message {message_id}")
                 except Exception as e:
                     print(f"❌ Error calling callback: {e}")
             else:
-                print(f"⚠️ No callback provided for message {message.id}")
-            print(f"✅ Message sent successfully: {message.id}")
-            print(f"   Summary: Sender={device_id}, Receiver={receiver_id or receiver_unique_code}, Chat={chat.id}")
+                print(f"⚠️ No callback provided for message {message_id}")
+            print(f"✅✅✅ MESSAGE COMPLETE: {message_id}")
+            print(f"   Summary: Sender={device_id}, Receiver={receiver_id or receiver_unique_code}, Chat={chat_id_str}")
+            print(f"   Delivery: ✅ Delivered | MongoDB: {'✅ Saved' if mongo_available else '⚠️ Unavailable'}")
             return response
             
         except Exception as e:
