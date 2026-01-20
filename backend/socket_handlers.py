@@ -416,11 +416,15 @@ def register_socket_handlers(socketio_instance):
                 socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_unique_code}')
                 print(f"📤 [2b] Emitted to code room (fallback): code_{receiver_unique_code}")
 
-            # 2c. Always emit to code_{receiverUniqueCode} from request (extra delivery; client dedupes)
+            # 2c. Always emit to code_{receiverUniqueCode} from request; also lowercase in case receiver joined with different case
             if receiver_unique_code:
                 code_room_data = f'code_{receiver_unique_code}'
                 socketio_instance.emit('new_message', message_dict, room=code_room_data)
                 print(f"📤 [2c] Emitted to code room (from data): {code_room_data}")
+                code_room_lower = f'code_{receiver_unique_code.strip().lower()}'
+                if code_room_lower != code_room_data:
+                    socketio_instance.emit('new_message', message_dict, room=code_room_lower)
+                    print(f"📤 [2c-alt] Emitted to code room (lowercase): {code_room_lower}")
 
             # 2d. Emit directly to receiver's socket when found (extra targeting)
             if receiver_sid:

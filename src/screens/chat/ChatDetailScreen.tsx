@@ -975,13 +975,8 @@ const ChatDetailScreen: React.FC = () => {
         setAudioProgress(prev => ({...prev, [playingMessageId]: 0}));
       }
 
-      // Get full URL for audio
-      const getBaseUrl = () => {
-        if (__DEV__) {
-          return Platform.OS === 'android' ? 'http://192.168.1.16:5001' : 'http://localhost:5001';
-        }
-        return 'https://communication-vault.onrender.com';
-      };
+      // Get full URL for audio (always use production so emulator and device use same server)
+      const getBaseUrl = () => 'https://communication-vault.onrender.com';
       
       const audioUrl = message.mediaUrl?.startsWith('http') 
         ? message.mediaUrl 

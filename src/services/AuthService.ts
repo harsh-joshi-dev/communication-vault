@@ -2,15 +2,8 @@ import {User} from '../types';
 import {uuidv4} from '../utils/uuid';
 import axios from 'axios';
 
-// Backend API URL - Update this to your server URL
-// For Android emulator, use 10.0.2.2 instead of localhost
-// For physical device, use your computer's IP address
-import {Platform} from 'react-native';
-
-const getApiBaseUrl = () => {
-  // Always use production URL for reliability
-  return 'https://communication-vault.onrender.com/api';
-};
+// Backend API URL - both emulator and physical device use the same Render server
+const getApiBaseUrl = () => 'https://communication-vault.onrender.com/api';
 
 const API_BASE_URL = getApiBaseUrl();
 

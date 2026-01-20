@@ -194,10 +194,18 @@ class ChatService {
         const messageWithStatus = { ...message, status: message.status || 'delivered' };
         await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, true);
         console.log('✅ Chat updated/created with new message:', normalizedChatId);
-        const msgBase = (message.chatId || '').replace(/^chat_/, '');
-        this.chatListeners.forEach((listener) => {
-          try { chatStorageService.getChats().then(chats => { const c = chats.find(ch => { const base = (ch.id || '').replace(/^chat_/, ''); return base === msgBase || ch.id === message.chatId || ch.id === normalizedChatId; }); listener(c || ({} as Chat)); }).catch(() => listener({} as Chat)); } catch { listener({} as Chat); }
-        });
+        const minimalChat: Chat = {
+          id: normalizedChatId,
+          participantIds: [message.senderId, message.receiverId].filter(Boolean) as string[],
+          otherUser: { id: message.senderId, name: 'Unknown User', isAppUser: true },
+          lastMessage: messageWithStatus,
+          updatedAt: new Date().toISOString(),
+          unreadCount: 1,
+          isBlocked: false,
+          createdAt: new Date().toISOString(),
+        };
+        this.chatListeners.forEach((l) => { try { l(minimalChat); } catch (_) {} });
+        this.notifyChatListRefresh();
       } catch (e: any) { console.error('❌ Error updating chat:', e); }
       this.messageListeners.forEach((l, i) => { try { l(message); } catch (e) { console.error(`Message listener ${i} error:`, e); } });
       setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 400);
@@ -228,6 +236,16 @@ class ChatService {
 
   private setupEventListeners(): void {
     if (!this.socket) return;
+
+    // When server asks us to join a chat room (so we can receive new_message via chat_ room too)
+    this.socket.on('join_chat', (data: any) => {
+      const cid = data?.chatId;
+      if (cid) {
+        const full = (cid as string).startsWith('chat_') ? cid : `chat_${cid}`;
+        this.joinChat(full);
+        console.log('📥 Joined chat room (server requested):', full);
+      }
+    });
 
     this.socket.on('new_message', async (messageData: any) => {
       await this.processIncomingMessage(messageData);

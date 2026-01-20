@@ -10,6 +10,7 @@ import AppNavigator from './navigation/AppNavigator';
 import SplashScreen from './screens/SplashScreen';
 import {preventScreenshot} from './services/SecurityService';
 import {checkFirstLaunch, getStoredTheme} from './services/StorageService';
+import {chatService} from './services/ChatService';
 
 const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
@@ -18,6 +19,13 @@ const App: React.FC = () => {
   useEffect(() => {
     initializeApp();
   }, []);
+
+  // Connect to chat server as soon as app is ready so the receiver (e.g. emulator) is connected when messages are sent
+  useEffect(() => {
+    if (!isLoading) {
+      chatService.connect().catch(() => {});
+    }
+  }, [isLoading]);
 
   const initializeApp = async () => {
     try {

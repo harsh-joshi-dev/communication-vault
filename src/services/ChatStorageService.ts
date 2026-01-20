@@ -43,7 +43,11 @@ class ChatStorageService {
       if (chats.length === 0) {
         if (this.lastChatsCache.length > 0 && (Date.now() - this.lastWrittenAt) < 60000) {
           console.log('📥 getChats: using in-memory cache (EncryptedStorage returned [])');
-          return [...this.lastChatsCache];
+          return [...this.lastChatsCache].sort((a: Chat, b: Chat) => {
+            const tA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+            const tB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+            return tB - tA;
+          });
         }
         return [];
       }

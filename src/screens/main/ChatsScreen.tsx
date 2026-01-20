@@ -8,6 +8,7 @@ import {
   Image,
   AppState,
   AppStateStatus,
+  RefreshControl,
 } from 'react-native';
 import {useNavigation, useFocusEffect} from '@react-navigation/native';
 import {SafeAreaView} from 'react-native-safe-area-context';
@@ -25,10 +26,25 @@ const ChatsScreen: React.FC = () => {
   const [typingStatus, setTypingStatus] = useState<{[chatId: string]: {isTyping: boolean; typingUser: string}}>({});
 
   // Subscribe to new messages and chat updates ONCE on mount; stay subscribed until unmount
-  // so chat list updates even when we're on ChatDetail or app was in background
   useEffect(() => {
     const unM = chatService.onMessage(() => { loadChats(true); });
-    const unC = chatService.onChatUpdate(() => { loadChats(true); });
+    const unC = chatService.onChatUpdate((chat: Chat) => {
+      if (chat && (chat as any).id) {
+        setChats(prev => {
+          const n = (id: string) => (id || '').replace(/^chat_/, '');
+          const nid = n((chat as any).id);
+          const i = prev.findIndex(c => n(c.id) === nid);
+          const ch = { ...chat, lastMessage: chat.lastMessage || (chat as any).lastMessage, updatedAt: (chat as any).updatedAt || new Date().toISOString() };
+          if (i >= 0) {
+            const next = [...prev];
+            next[i] = { ...next[i], ...ch, lastMessage: ch.lastMessage || next[i].lastMessage };
+            return next.sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
+          }
+          return [ch, ...prev].sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
+        });
+      }
+      loadChats(true);
+    });
     const unD = chatService.onChatDeletedForEveryone((id) => {
       chatStorageService.deleteChat(id).catch(() => {});
       loadChats(true);
@@ -54,12 +70,18 @@ const ChatsScreen: React.FC = () => {
       console.log('📱 ChatsScreen: Screen focused, loading chats...');
       chatService.connect().then(() => {
         loadChats();
-        chatService.fetchPendingMessages().catch(() => {});
+        // Fetch pending (cross-instance/offline) then reload so new chats appear on receiver
+        chatService.fetchPendingMessages().then(() => loadChats(true));
       }).catch(() => {
         loadChats();
-        chatService.fetchPendingMessages().catch(() => {});
+        chatService.fetchPendingMessages().then(() => loadChats(true));
         setTimeout(() => chatService.connect().catch(() => {}), 3000);
       });
+
+      // When list is empty, retry fetchPending after 2s (catches timing/connection delays)
+      const retryEmpty = setTimeout(() => {
+        chatService.fetchPendingMessages().then(() => loadChats(true));
+      }, 2000);
 
       // Listen for typing indicators
       const setupTypingListener = () => {
@@ -165,17 +187,18 @@ const ChatsScreen: React.FC = () => {
         }
       }, 1000);
       
-      // Periodic refresh: loadChats every 5s; fetchPending every 10s (catches cross-instance / missed socket)
+      // Periodic refresh: loadChats every 5s; fetchPending every 5s (aggressive when list empty / cross-instance)
       const refreshInterval = setInterval(() => loadChats(true), 5000);
       const pendingInterval = setInterval(() => {
         chatService.fetchPendingMessages().catch(() => {});
-      }, 10000);
+      }, 5000);
 
       return () => {
         if (typingUnsubscribe) typingUnsubscribe();
         if (typingSetupTimeout) clearTimeout(typingSetupTimeout);
         if (refreshInterval) clearInterval(refreshInterval);
         if (pendingInterval) clearInterval(pendingInterval);
+        clearTimeout(retryEmpty);
       };
     }, [])
   );
@@ -184,7 +207,7 @@ const ChatsScreen: React.FC = () => {
     try {
       if (!silent) setLoading(true);
       const loadedChats = await chatStorageService.getChats();
-      setChats(loadedChats);
+      setChats(prev => loadedChats.length > 0 ? loadedChats : prev);
       if (loadedChats.length === 0) {
         [400, 800, 1400, 2000].forEach((ms) => {
           setTimeout(() => {
@@ -308,29 +331,37 @@ const ChatsScreen: React.FC = () => {
           <Icon name="settings" size={24} color="#2196F3" />
         </TouchableOpacity>
       </View>
-      {loading ? (
-        <View style={styles.emptyContainer}>
-          <Text style={styles.emptyText}>Loading chats...</Text>
-        </View>
-      ) : chats.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <Icon name="chatbubbles-outline" size={80} color="#ccc" />
-          <Text style={styles.emptyText}>No chats yet</Text>
-          <Text style={styles.emptySubtext}>
-            Scan a QR code to start chatting
-          </Text>
-        </View>
-      ) : (
-        <FlatList
-          data={chats}
-          renderItem={renderChatItem}
-          keyExtractor={item => item.id}
-          extraData={chats}
-          contentContainerStyle={styles.listContent}
-          refreshing={loading}
-          onRefresh={loadChats}
-        />
-      )}
+      <FlatList
+        data={chats}
+        renderItem={renderChatItem}
+        keyExtractor={item => item.id}
+        extraData={chats}
+        contentContainerStyle={[styles.listContent, chats.length === 0 && styles.listContentEmpty]}
+        ListEmptyComponent={
+          <View style={styles.emptyContainer}>
+            {loading ? (
+              <Text style={styles.emptyText}>Loading chats...</Text>
+            ) : (
+              <>
+                <Icon name="chatbubbles-outline" size={80} color="#ccc" />
+                <Text style={styles.emptyText}>No chats yet</Text>
+                <Text style={styles.emptySubtext}>
+                  Scan a QR code to start chatting
+                </Text>
+                <Text style={styles.emptySyncHint}>
+                  Someone sent you a message? Pull down to sync.
+                </Text>
+              </>
+            )}
+          </View>
+        }
+        refreshControl={
+          <RefreshControl
+            refreshing={loading}
+            onRefresh={() => { loadChats(); chatService.fetchPendingMessages().then(() => loadChats(true)); }}
+          />
+        }
+      />
       <TouchableOpacity
         style={styles.fab}
         onPress={() => {
@@ -368,6 +399,9 @@ const styles = StyleSheet.create({
   },
   listContent: {
     padding: 10,
+  },
+  listContentEmpty: {
+    flexGrow: 1,
   },
   chatItem: {
     flexDirection: 'row',
@@ -478,6 +512,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#ccc',
     marginTop: 10,
+    textAlign: 'center',
+  },
+  emptySyncHint: {
+    fontSize: 13,
+    color: '#2196F3',
+    marginTop: 16,
     textAlign: 'center',
   },
   avatar: {
