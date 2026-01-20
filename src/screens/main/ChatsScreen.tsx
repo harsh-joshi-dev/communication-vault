@@ -280,8 +280,17 @@ const ChatsScreen: React.FC = () => {
       if (!silent) setLoading(true);
       const loadedChats = await chatStorageService.getChats();
       
+      // Filter out chats with unsent lastMessage (status 'sending' or 'pending')
+      // This ensures unsent messages don't appear in the chat list
+      const filteredChats = loadedChats.filter(chat => {
+        if (!chat.lastMessage) return true; // Chat with no lastMessage is fine
+        // Filter out chats with unsent lastMessage
+        const status = chat.lastMessage.status || 'sent';
+        return status !== 'sending' && status !== 'pending';
+      });
+      
       // Ensure chats are sorted by updatedAt (most recent first) - WhatsApp style
-      const sortedChats = loadedChats.sort((a, b) => {
+      const sortedChats = filteredChats.sort((a, b) => {
         const dateA = new Date(a.updatedAt || a.createdAt || 0).getTime();
         const dateB = new Date(b.updatedAt || b.createdAt || 0).getTime();
         return dateB - dateA; // Descending: most recent first
@@ -385,7 +394,8 @@ const ChatsScreen: React.FC = () => {
                 {' is typing...'}
               </Text>
             </View>
-          ) : item.lastMessage ? (
+          ) : item.lastMessage && item.lastMessage.status && item.lastMessage.status !== 'sending' && item.lastMessage.status !== 'pending' ? (
+            // Only show lastMessage if it's successfully sent (not 'sending' or 'pending')
             <Text 
               style={[
                 styles.lastMessage,

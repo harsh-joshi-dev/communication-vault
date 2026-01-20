@@ -321,8 +321,17 @@ class ChatStorageService {
       
       if (chatIndex >= 0) {
         // Chat exists - update it
-        chats[chatIndex].lastMessage = message;
-        chats[chatIndex].updatedAt = new Date().toISOString();
+        // Only update lastMessage if message is successfully sent (not 'sending' status)
+        // This ensures unsent messages don't appear in chat list
+        const isMessageSent = message.status && message.status !== 'sending' && message.status !== 'pending';
+        
+        if (isMessageSent) {
+          chats[chatIndex].lastMessage = message;
+          chats[chatIndex].updatedAt = new Date().toISOString();
+        } else {
+          // Don't update lastMessage for unsent messages, but update timestamp if needed
+          chats[chatIndex].updatedAt = new Date().toISOString();
+        }
         
         // Ensure chatId matches normalized format
         if (chats[chatIndex].id !== normalizedChatId) {
@@ -331,12 +340,21 @@ class ChatStorageService {
         }
         
         // Increment unread count if message is from other user and incrementUnread is true
-        if (message.senderId !== currentDeviceId && !message.isDeleted && incrementUnread) {
+        // Only increment for successfully sent messages (not 'sending' status)
+        if (message.senderId !== currentDeviceId && !message.isDeleted && incrementUnread && isMessageSent) {
           chats[chatIndex].unreadCount = (chats[chatIndex].unreadCount || 0) + 1;
         }
         
         await this.saveChats(chats);
         console.log(`✅ Updated existing chat: ${normalizedChatId} (Total chats: ${chats.length})`);
+        
+        // Notify chat list to refresh (ensures UI updates on receiver device)
+        try {
+          const {chatService} = await import('./ChatService');
+          chatService.notifyChatListRefresh();
+        } catch (e) {
+          // Ignore if ChatService not loaded yet
+        }
       } else {
         // Chat doesn't exist - retry getChats once to avoid overwriting due to flaky read
         if (chats.length === 0) {
@@ -353,10 +371,18 @@ class ChatStorageService {
               chat.otherUser?.id === message.receiverId
             );
             if (chatIndex >= 0) {
-              chats[chatIndex].lastMessage = message;
-              chats[chatIndex].updatedAt = new Date().toISOString();
+              // Only update lastMessage if message is successfully sent (not 'sending' status)
+              const isMessageSent = message.status && message.status !== 'sending' && message.status !== 'pending';
+              
+              if (isMessageSent) {
+                chats[chatIndex].lastMessage = message;
+                chats[chatIndex].updatedAt = new Date().toISOString();
+              } else {
+                chats[chatIndex].updatedAt = new Date().toISOString();
+              }
+              
               if (chats[chatIndex].id !== normalizedChatId) chats[chatIndex].id = normalizedChatId;
-              if (message.senderId !== currentDeviceId && !message.isDeleted && incrementUnread) {
+              if (message.senderId !== currentDeviceId && !message.isDeleted && incrementUnread && isMessageSent) {
                 chats[chatIndex].unreadCount = (chats[chatIndex].unreadCount || 0) + 1;
               }
               await this.saveChats(chats);
@@ -385,6 +411,10 @@ class ChatStorageService {
                            (message as any).contactName ||
                            'Unknown User';
           
+          // Only create chat with lastMessage if message is successfully sent (not 'sending' status)
+          // This ensures unsent messages don't create empty chat entries
+          const isMessageSent = message.status && message.status !== 'sending' && message.status !== 'pending';
+          
           const newChat: Chat = {
             id: normalizedChatId,
             participantIds: [currentDeviceId, actualOtherId].filter(Boolean) as string[],
@@ -394,8 +424,8 @@ class ChatStorageService {
               uniqueCode: otherUniqueCode, 
               isAppUser: true 
             },
-            lastMessage: message,
-            unreadCount: isFromMe ? 0 : (incrementUnread ? 1 : 0),
+            lastMessage: isMessageSent ? message : undefined, // Only set lastMessage if message is sent
+            unreadCount: isFromMe ? 0 : (incrementUnread && isMessageSent ? 1 : 0),
             isBlocked: false,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -403,6 +433,10 @@ class ChatStorageService {
           chats.push(newChat);
           await this.saveChats(chats);
           console.log(`✅ Created new chat: ${normalizedChatId} with ${otherName} (${actualOtherId}) - should appear in chat list now!`);
+          
+          // Notify chat list to refresh immediately (CRITICAL for receiver device)
+          const {chatService} = await import('./ChatService');
+          chatService.notifyChatListRefresh();
           
           // Chat is now created - listeners will be notified by ChatService
         } else {

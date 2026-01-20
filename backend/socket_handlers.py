@@ -329,7 +329,12 @@ def register_socket_handlers(socketio_instance):
                             break
             
             if not receiver_actual_device_id:
-                print(f"⚠️ Receiver device not found. Will use code room: code_{receiver_unique_code}")
+                # This is normal when receiver is offline/disconnected - code room fallback ensures delivery on reconnect
+                # Messages will be delivered via code room, which the receiver joins on connection
+                if receiver_unique_code:
+                    print(f"ℹ️ Receiver device not currently connected. Will deliver via code room on reconnect: code_{receiver_unique_code}")
+                else:
+                    print(f"⚠️ Receiver device not found and no uniqueCode provided. Message delivered to chat room only.")
 
             # STEP 2: DELIVER MESSAGE VIA SOCKET (works even if MongoDB failed)
             print(f"🚀 DELIVERING MESSAGE VIA SOCKET:")

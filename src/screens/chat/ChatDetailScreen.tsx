@@ -11,6 +11,8 @@ import {
   Platform,
   Alert,
   StatusBar,
+  AppState,
+  AppStateStatus,
 } from 'react-native';
 import {useRoute, useNavigation, useFocusEffect} from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/Ionicons';
@@ -58,6 +60,60 @@ const ChatDetailScreen: React.FC = () => {
   const flatListRef = useRef<FlatList>(null);
   const audioRecorderPlayer = useRef(new AudioRecorderPlayer()).current;
 
+  // Handle app state changes to reconnect when app comes back from background
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'active') {
+        console.log('📱 App came to foreground - FORCE reconnecting socket immediately...');
+        // Force immediate reconnection - reset connection state first
+        const socket = (chatService as any).socketInstance;
+        if (socket) {
+          // Force disconnect stale connection if exists
+          socket.removeAllListeners();
+          socket.disconnect();
+        }
+        (chatService as any).socket = null;
+        (chatService as any).isAuthenticated = false;
+        (chatService as any).connectionPromise = null;
+        
+        // Immediate connection attempt (non-blocking but urgent)
+        chatService.connect().then(() => {
+          console.log('✅ Reconnected after app state change');
+          // Re-join chat after reconnection
+          chatService.joinChat(chatId).then(() => {
+            console.log('✅ Rejoined chat after reconnect');
+            // Fetch any pending messages immediately
+            chatService.fetchPendingMessages().then(() => {
+              loadMessages();
+            }).catch(() => {
+              loadMessages();
+            });
+          }).catch(() => {
+            console.log('⚠️ Failed to rejoin chat after reconnect, retrying...');
+            // Retry join after short delay
+            setTimeout(() => {
+              chatService.joinChat(chatId).catch(() => {});
+            }, 1000);
+            loadMessages();
+          });
+        }).catch(() => {
+          console.log('⚠️ Reconnection failed after app state change, retrying...');
+          // Retry immediately after short delay
+          setTimeout(() => {
+            chatService.connect().then(() => {
+              chatService.joinChat(chatId).catch(() => {});
+            }).catch(() => {});
+          }, 500);
+        });
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => {
+      subscription.remove();
+    };
+  }, [chatId]);
+
   // Reload messages and chat name when screen comes into focus (like WhatsApp)
   useFocusEffect(
     React.useCallback(() => {
@@ -67,15 +123,52 @@ const ChatDetailScreen: React.FC = () => {
       chatStorageService.markChatAsRead(chatId);
       
       // Connect and join chat (wait for connection before joining)
+      // AGGRESSIVE reconnection check when screen comes into focus
+      // Force reset connection state for immediate reconnect
+      const socket = (chatService as any).socketInstance;
+      if (socket && (!socket.connected || !(chatService as any).isAuthenticated)) {
+        console.log('🔄 Screen focused - forcing connection reset...');
+        socket.removeAllListeners();
+        socket.disconnect();
+        (chatService as any).socket = null;
+        (chatService as any).isAuthenticated = false;
+        (chatService as any).connectionPromise = null;
+      }
+      
       chatService.connect().then(() => {
+        console.log('✅ Connected when screen focused');
         // Join chat after connection is established
-        chatService.joinChat(chatId).catch(() => {
-          // Join failed, but that's okay - will retry
-          console.log('⚠️ Failed to join chat initially, will retry when connected');
+        chatService.joinChat(chatId).then(() => {
+          console.log('✅ Joined chat when screen focused');
+        }).catch(() => {
+          // Join failed, retry immediately
+          console.log('⚠️ Failed to join chat initially, retrying...');
+          setTimeout(() => {
+            chatService.joinChat(chatId).catch(() => {});
+          }, 500);
+        });
+        // Fetch pending messages when connected
+        chatService.fetchPendingMessages().then(() => {
+          loadMessages();
+        }).catch(() => {
+          loadMessages();
         });
       }).catch(() => {
-        // Connection failed, but that's okay - messages will still load from storage
-        console.log('⚠️ Connection failed, messages loaded from storage');
+        // Connection failed, retry immediately with aggressive attempts
+        console.log('⚠️ Connection failed on focus, retrying aggressively...');
+        // Immediate retry
+        setTimeout(() => {
+          chatService.connect().then(() => {
+            chatService.joinChat(chatId).catch(() => {});
+          }).catch(() => {
+            // Second retry after delay
+            setTimeout(() => {
+              chatService.connect().then(() => {
+                chatService.joinChat(chatId).catch(() => {});
+              }).catch(() => {});
+            }, 1000);
+          });
+        }, 300);
       });
       
       // Fetch pending messages immediately when screen focuses
@@ -543,8 +636,14 @@ const ChatDetailScreen: React.FC = () => {
       const allMsgs = await chatService.getMessages(chatId);
       console.log(`✅ Loaded ${allMsgs.length} message(s) from storage`);
       
-      // Filter out deleted messages
-      const visibleMessages = allMsgs.filter(msg => !msg.isDeleted);
+      // Filter out deleted messages and unsent messages (status 'sending' or 'pending')
+      // This ensures unsent messages don't appear in the chat view
+      const visibleMessages = allMsgs.filter(msg => {
+        if (msg.isDeleted) return false;
+        // Filter out messages with 'sending' or 'pending' status (unsent messages)
+        const status = msg.status || 'sent';
+        return status !== 'sending' && status !== 'pending';
+      });
       
       // Filter messages that match this chat - be more precise
       const matchingMessages = visibleMessages.filter(msg => {
@@ -576,14 +675,36 @@ const ChatDetailScreen: React.FC = () => {
       });
       
       // Sort by timestamp (ascending - oldest first, newest at bottom) - WhatsApp style
+      // Use a consistent timestamp field: prefer sentAt (when message was actually sent) over createdAt
+      // This ensures messages appear in the exact order they were sent, not when they were created
+      const getMessageTimestamp = (msg: Message): number => {
+        // Use sentAt if available (more accurate for message order), fallback to createdAt
+        const timestamp = msg.sentAt || msg.createdAt;
+        if (!timestamp) return 0;
+        const date = new Date(timestamp).getTime();
+        // If invalid date, return 0
+        return isNaN(date) ? 0 : date;
+      };
+      
       const sortedMessages = Array.from(uniqueMap.values()).sort((a, b) => {
-        const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
-        const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
-        // If timestamps are equal, use a fallback to maintain order
-        if (dateA === dateB) {
-          return (a.id || '').localeCompare(b.id || '');
+        const dateA = getMessageTimestamp(a);
+        const dateB = getMessageTimestamp(b);
+        
+        // Primary sort: by timestamp (ascending - oldest first)
+        if (dateA !== dateB) {
+          return dateA - dateB;
         }
-        return dateA - dateB;
+        
+        // Secondary sort: if timestamps are equal, sort by message ID (stable sort)
+        // This ensures messages sent at the exact same time maintain a consistent order
+        const idA = (a.id || '').toString();
+        const idB = (b.id || '').toString();
+        if (idA && idB) {
+          return idA.localeCompare(idB);
+        }
+        
+        // Tertiary sort: by content hash if IDs are equal (shouldn't happen but safety)
+        return (a.content || '').localeCompare(b.content || '');
       });
       
       console.log(`✅ Filtered and deduplicated: ${allMsgs.length} → ${sortedMessages.length} unique messages for this chat`);
@@ -659,6 +780,39 @@ const ChatDetailScreen: React.FC = () => {
         return;
       }
       
+      // Filter out unsent messages (status 'sending' or 'pending') from displaying
+      // This ensures unsent messages don't appear in the chat view
+      const messageStatus = message.status || 'sent';
+      if (messageStatus === 'sending' || messageStatus === 'pending') {
+        console.log('⚠️ Ignoring unsent message (status:', messageStatus + ')');
+        return;
+      }
+      
+      // Check if this is an echo-back of a message we just sent (prevent duplicates)
+      // Reuse isFromMe already declared above
+      if (isFromMe) {
+        // Check if message already exists in current messages state (might be echo-back)
+        const existingMessage = messages.find(msg => 
+          msg.id === message.id || 
+          (msg as any)._id === message.id ||
+          // Also check by content and timestamp to catch duplicates
+          (msg.content === message.content && 
+           msg.senderId === message.senderId &&
+           Math.abs(new Date(msg.sentAt || msg.createdAt || 0).getTime() - new Date(message.sentAt || message.createdAt || 0).getTime()) < 5000)
+        );
+        
+        if (existingMessage) {
+          console.log('⚠️ Ignoring echo-back of my own message - already displayed:', message.id);
+          // Still update the existing message's status if needed
+          if (message.status && message.status !== existingMessage.status) {
+            setMessages(prev => prev.map(msg => 
+              msg.id === existingMessage.id ? {...msg, status: message.status} : msg
+            ));
+          }
+          return;
+        }
+      }
+      
       console.log('✅ Message is for this chat, displaying it!', message);
       
       // Normalize message chatId to match current chatId format for consistency
@@ -668,11 +822,24 @@ const ChatDetailScreen: React.FC = () => {
       if (normalizedMessage.isDeleted) {
         setMessages(prev => {
           const filtered = prev.filter(msg => msg.id !== normalizedMessage.id && (msg as any)._id !== normalizedMessage.id);
-          // Ensure sorted order after filtering
+          // Ensure sorted order after filtering - use consistent timestamp
+          const getMessageTimestamp = (msg: Message): number => {
+            const timestamp = msg.sentAt || msg.createdAt;
+            if (!timestamp) return 0;
+            const date = new Date(timestamp).getTime();
+            return isNaN(date) ? 0 : date;
+          };
+          
           return filtered.sort((a, b) => {
-            const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
-            const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
-            return dateA - dateB;
+            const dateA = getMessageTimestamp(a);
+            const dateB = getMessageTimestamp(b);
+            if (dateA !== dateB) {
+              return dateA - dateB;
+            }
+            // Stable sort by ID if timestamps equal
+            const idA = (a.id || '').toString();
+            const idB = (b.id || '').toString();
+            return idA.localeCompare(idB);
           });
         });
         return;
@@ -709,11 +876,32 @@ const ChatDetailScreen: React.FC = () => {
           }
         });
         
+        // Use consistent timestamp calculation for perfect ordering
+        const getMessageTimestamp = (msg: Message): number => {
+          const timestamp = msg.sentAt || msg.createdAt;
+          if (!timestamp) return 0;
+          const date = new Date(timestamp).getTime();
+          return isNaN(date) ? 0 : date;
+        };
+        
         const sorted = Array.from(uniqueMap.values()).sort((a, b) => {
-          const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
-          const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
-          // Ascending order: oldest first, newest at bottom (WhatsApp style)
-          return dateA - dateB;
+          const dateA = getMessageTimestamp(a);
+          const dateB = getMessageTimestamp(b);
+          
+          // Primary sort: by timestamp (ascending - oldest first)
+          if (dateA !== dateB) {
+            return dateA - dateB;
+          }
+          
+          // Secondary sort: by message ID (stable sort)
+          const idA = (a.id || '').toString();
+          const idB = (b.id || '').toString();
+          if (idA && idB) {
+            return idA.localeCompare(idB);
+          }
+          
+          // Tertiary sort: by content
+          return (a.content || '').localeCompare(b.content || '');
         });
         
         return sorted;
@@ -820,35 +1008,73 @@ const ChatDetailScreen: React.FC = () => {
         const withoutTemp = prev.filter(msg => msg.id !== tempMessageId);
         
         // Check if real message already exists (it might if message listener processed it)
-        const exists = withoutTemp.find(msg => msg.id === sentMessage.id || (msg as any)._id === sentMessage.id);
+        // Check by ID first, then by content+timestamp to catch duplicates
+        const existsIndex = withoutTemp.findIndex(msg => 
+          msg.id === sentMessage.id || 
+          (msg as any)._id === sentMessage.id ||
+          // Also check by content and timestamp (within 5 seconds) to catch duplicates
+          (msg.content === sentMessage.content && 
+           msg.senderId === sentMessage.senderId &&
+           Math.abs(new Date(msg.sentAt || msg.createdAt || 0).getTime() - new Date(sentMessage.sentAt || sentMessage.createdAt || 0).getTime()) < 5000)
+        );
         
-        if (!exists) {
-          // Add the sent message
-          withoutTemp.push({...sentMessage, status: sentMessage.status || 'sent', chatId});
+        if (existsIndex >= 0) {
+          // Update existing message (don't add duplicate)
+          withoutTemp[existsIndex] = {...sentMessage, status: sentMessage.status || 'sent', chatId};
         } else {
-          // Update existing message
-          const updated = withoutTemp.map(msg => {
-            if (msg.id === sentMessage.id || (msg as any)._id === sentMessage.id) {
-              return {...sentMessage, status: sentMessage.status || 'sent', chatId};
-            }
-            return msg;
-          });
-          withoutTemp.splice(0, withoutTemp.length, ...updated);
+          // Add the sent message only if it doesn't exist
+          withoutTemp.push({...sentMessage, status: sentMessage.status || 'sent', chatId});
         }
         
-        // Remove duplicates and sort
+        // Remove duplicates by ID and by content+timestamp (prevent duplicate messages)
         const uniqueMap = new Map<string, Message>();
+        const seenContent = new Set<string>();
+        
         withoutTemp.forEach(msg => {
           const msgId = msg.id || (msg as any)._id || '';
-          if (msgId && !uniqueMap.has(msgId)) {
-            uniqueMap.set(msgId, msg);
+          // Create a unique key based on ID, or content+timestamp if no ID
+          const contentKey = `${msg.content}_${msg.senderId}_${new Date(msg.sentAt || msg.createdAt || 0).getTime()}`;
+          
+          if (msgId) {
+            // Dedupe by ID
+            if (!uniqueMap.has(msgId)) {
+              uniqueMap.set(msgId, msg);
+              seenContent.add(contentKey);
+            }
+          } else if (!seenContent.has(contentKey)) {
+            // Dedupe by content+timestamp for messages without IDs
+            const generatedId = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+            uniqueMap.set(generatedId, {...msg, id: generatedId});
+            seenContent.add(contentKey);
           }
         });
         
+        // Use consistent timestamp calculation for perfect ordering
+        const getMessageTimestamp = (msg: Message): number => {
+          const timestamp = msg.sentAt || msg.createdAt;
+          if (!timestamp) return 0;
+          const date = new Date(timestamp).getTime();
+          return isNaN(date) ? 0 : date;
+        };
+        
         return Array.from(uniqueMap.values()).sort((a, b) => {
-          const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
-          const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
-          return dateA - dateB;
+          const dateA = getMessageTimestamp(a);
+          const dateB = getMessageTimestamp(b);
+          
+          // Primary sort: by timestamp (ascending - oldest first)
+          if (dateA !== dateB) {
+            return dateA - dateB;
+          }
+          
+          // Secondary sort: by message ID (stable sort)
+          const idA = (a.id || '').toString();
+          const idB = (b.id || '').toString();
+          if (idA && idB) {
+            return idA.localeCompare(idB);
+          }
+          
+          // Tertiary sort: by content
+          return (a.content || '').localeCompare(b.content || '');
         });
       });
       

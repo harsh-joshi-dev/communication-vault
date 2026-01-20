@@ -36,9 +36,22 @@ class ChatService {
   }
 
   async connect(): Promise<void> {
-    // If already connected and authenticated, return immediately
+    // If already connected and authenticated, verify connection is still valid
     if (this.socket?.connected && this.isAuthenticated && this.socket.id) {
-      return Promise.resolve();
+      // Double-check connection is still alive by checking socket state
+      if (this.socket.io && this.socket.io.engine && this.socket.io.engine.readyState === 'open') {
+        return Promise.resolve();
+      } else {
+        // Socket exists but not truly connected - force reconnect
+        console.log('⚠️ Socket appears connected but not alive, forcing reconnect...');
+        if (this.socket) {
+          this.socket.removeAllListeners();
+          this.socket.disconnect();
+          this.socket = null;
+        }
+        this.isAuthenticated = false;
+        this.connectionPromise = null;
+      }
     }
 
     // If connection is in progress, wait for it
@@ -47,8 +60,8 @@ class ChatService {
     }
 
     const maxAttempts = 4;
-    const authTimeoutMs = 90000;
-    const retryDelayMs = 5000;
+    const authTimeoutMs = 45000; // Reduced from 90s to 45s for faster feedback
+    const retryDelayMs = 2000; // Reduced from 5s to 2s for faster reconnection
 
     this.connectionPromise = (async () => {
       let deviceInfo: {deviceId: string; uniqueCode: string; deviceName: string};
@@ -106,9 +119,9 @@ class ChatService {
         transports: ['polling', 'websocket'],
         reconnection: true,
         reconnectionAttempts: Infinity,
-        reconnectionDelay: 1000,
-        reconnectionDelayMax: 8000,
-        timeout: 45000,
+        reconnectionDelay: 500, // Faster initial reconnection (500ms instead of 1000ms)
+        reconnectionDelayMax: 5000, // Faster max reconnection delay (5s instead of 8s)
+        timeout: 30000, // Faster timeout (30s instead of 45s)
         forceNew: true,
       });
       this.socket = socket;
@@ -155,8 +168,44 @@ class ChatService {
       });
 
       socket.on('disconnect', (reason: string) => {
+        console.log('⚠️ Socket disconnected:', reason);
         this.isAuthenticated = false;
-        if (reason === 'io server disconnect') socket.connect();
+        // Auto-reconnect for certain disconnect reasons
+        if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'transport error') {
+          console.log('🔄 Attempting auto-reconnect...');
+          setTimeout(() => {
+            if (!this.socket?.connected) {
+              socket.connect();
+            }
+          }, 1000);
+        }
+      });
+      
+      // Handle reconnection events
+      socket.on('reconnect', (attemptNumber: number) => {
+        console.log(`✅ Socket reconnected after ${attemptNumber} attempts`);
+        // Re-authenticate and re-join rooms after reconnection
+        if (socket.connected) {
+          const did = deviceInfo.deviceId;
+          const code = deviceInfo.uniqueCode;
+          socket.emit('join_chat', {chatId: `device_${did}`});
+          if (code) socket.emit('join_chat', {chatId: `code_${code}`});
+          console.log('✅ Rejoined device and code rooms after reconnect');
+        }
+      });
+      
+      socket.on('reconnect_attempt', (attemptNumber: number) => {
+        console.log(`🔄 Reconnection attempt ${attemptNumber}`);
+      });
+      
+      socket.on('reconnect_error', (error: Error) => {
+        console.warn('⚠️ Reconnection error:', error.message);
+      });
+      
+      socket.on('reconnect_failed', () => {
+        console.error('❌ Reconnection failed - will try manual reconnect');
+        // Reset connection state to allow manual reconnect
+        this.connectionPromise = null;
       });
 
       this.setupEventListeners();
@@ -222,6 +271,38 @@ class ChatService {
       const isFromMe = message.senderId === deviceInfo.deviceId || message.senderId === deviceInfo.uniqueCode;
       const otherUserId = isFromMe ? message.receiverId : message.senderId;
       
+      // CRITICAL: If message is from me and I just sent it, check if it already exists in storage
+      // This prevents duplicate messages when socket echoes back my own message
+      if (isFromMe) {
+        try {
+          const existingMessages = await messageStorageService.getMessages(message.chatId || '');
+          const messageExists = existingMessages.find(m => 
+            (m.id === message.id || m.id === (message as any)._id) ||
+            ((m.content === message.content || m.content === message.content) && 
+             Math.abs(new Date(m.sentAt || m.createdAt || 0).getTime() - new Date(message.sentAt || message.createdAt || 0).getTime()) < 5000)
+          );
+          
+          if (messageExists && messageExists.status && messageExists.status !== 'sending') {
+            console.log('⚠️ Ignoring echo-back of my own message - already processed:', message.id);
+            // Still update chat and notify listeners, but don't save message again
+            const {chatStorageService} = await import('./ChatStorageService');
+            const normalizedChatId = message.chatId?.startsWith('chat_') ? message.chatId : `chat_${message.chatId}`;
+            const messageWithStatus = { ...message, chatId: normalizedChatId, status: message.status || 'sent' };
+            await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, false);
+            
+            // Notify listeners with existing message to update status if needed
+            this.messageListeners.forEach(l => { 
+              try { 
+                l({...messageExists, ...messageWithStatus}); 
+              } catch (e) {} 
+            });
+            return; // Exit early - don't process further
+          }
+        } catch (e) {
+          console.error('Error checking for existing message:', e);
+        }
+      }
+      
       let minimalChat: Chat | null = null;
       
       try {
@@ -265,7 +346,7 @@ class ChatService {
         } 
       });
       
-      // Notify chat listeners immediately (this is CRITICAL for receiver device to see new chat)
+      // Notify chat listeners immediately with minimalChat (this is CRITICAL for receiver device to see new chat)
       if (minimalChat) {
         console.log('📢 Triggering chat listeners immediately with minimal chat');
         this.chatListeners.forEach(l => { 
@@ -278,10 +359,21 @@ class ChatService {
       }
       
       // Trigger multiple refreshes to ensure UI updates (important for receiver device)
+      // Pass minimalChat to listeners multiple times to ensure it's processed
       console.log('📢 Notifying chat list to refresh multiple times (receiver should see new chat)');
-      this.notifyChatListRefresh(); // Immediate
+      
+      // Immediate: notify with minimalChat if available
+      if (minimalChat) {
+        this.chatListeners.forEach(l => { 
+          try { 
+            l(minimalChat!); 
+          } catch (_) {} 
+        });
+      }
+      this.notifyChatListRefresh(); // Also trigger full reload
+      
+      // Delayed refreshes with minimalChat
       setTimeout(() => { 
-        this.notifyChatListRefresh();
         if (minimalChat) {
           this.chatListeners.forEach(l => { 
             try { 
@@ -289,10 +381,38 @@ class ChatService {
             } catch (_) {} 
           });
         }
+        this.notifyChatListRefresh();
       }, 100);
-      setTimeout(() => { this.notifyChatListRefresh(); }, 500);
-      setTimeout(() => { this.notifyChatListRefresh(); }, 1000);
-      setTimeout(() => { this.notifyChatListRefresh(); }, 2000); // Extra delay for receiver
+      setTimeout(() => { 
+        if (minimalChat) {
+          this.chatListeners.forEach(l => { 
+            try { 
+              l(minimalChat!); 
+            } catch (_) {} 
+          });
+        }
+        this.notifyChatListRefresh(); 
+      }, 500);
+      setTimeout(() => { 
+        if (minimalChat) {
+          this.chatListeners.forEach(l => { 
+            try { 
+              l(minimalChat!); 
+            } catch (_) {} 
+          });
+        }
+        this.notifyChatListRefresh(); 
+      }, 1000);
+      setTimeout(() => { 
+        if (minimalChat) {
+          this.chatListeners.forEach(l => { 
+            try { 
+              l(minimalChat!); 
+            } catch (_) {} 
+          });
+        }
+        this.notifyChatListRefresh(); 
+      }, 2000); // Extra delay for receiver
     } catch (e: any) {
       console.error('❌ processIncomingMessage error:', e);
     }
@@ -638,18 +758,40 @@ class ChatService {
     // Resolve immediately - message is already saved and chat updated
     // Then try to send via socket in background (non-blocking)
     const sendPromise = (async () => {
-      // Try to connect if not connected (non-blocking - don't wait long)
-      let isConnected = this.socket?.connected && this.isAuthenticated;
+      // Try to connect if not connected - AGGRESSIVE reconnection for sendMessage
+      // Also verify connection is truly alive, not just reported as connected
+      let isConnected = this.socket?.connected && 
+                       this.isAuthenticated && 
+                       this.socket.io?.engine?.readyState === 'open';
       if (!isConnected) {
         try {
-          // Give connection 2 seconds max, then proceed
+          // Force reset connection state for aggressive reconnection
+          if (this.socket && (!this.socket.connected || !this.isAuthenticated)) {
+            console.log('🔄 Force resetting connection state for immediate reconnect...');
+            this.socket.removeAllListeners();
+            this.socket.disconnect();
+            this.socket = null;
+            this.isAuthenticated = false;
+            this.connectionPromise = null;
+          }
+          
+          // Give connection 5 seconds max for aggressive reconnection when sending
+          // This is longer because we want to ensure connection succeeds when user sends message
           await Promise.race([
             this.connect(),
-            new Promise(resolve => setTimeout(resolve, 2000))
+            new Promise(resolve => setTimeout(resolve, 5000))
           ]);
-          isConnected = this.socket?.connected && this.isAuthenticated;
+          // Double-check connection is truly alive after connect
+          isConnected = this.socket?.connected && 
+                       this.isAuthenticated && 
+                       this.socket.io?.engine?.readyState === 'open';
+          
+          if (isConnected) {
+            console.log('✅ Aggressively reconnected for message sending');
+          }
         } catch {
           isConnected = false;
+          // Continue anyway - message is already saved locally
         }
       }
 
@@ -787,10 +929,23 @@ class ChatService {
   }
 
   async joinChat(chatId: string): Promise<void> {
-    if (this.socket?.connected && this.isAuthenticated) {
-      console.log('📥 Joining chat room:', chatId);
-      this.socket.emit('join_chat', {chatId});
-      return;
+    // Verify connection is actually alive before joining
+    if (this.socket?.connected && this.isAuthenticated && this.socket.io?.engine?.readyState === 'open') {
+      try {
+        console.log('📥 Joining chat room:', chatId);
+        this.socket.emit('join_chat', {chatId});
+        return;
+      } catch (error) {
+        console.warn('⚠️ Error joining chat, will reconnect:', error);
+        // Connection might be stale - force reconnect
+        if (this.socket) {
+          this.socket.removeAllListeners();
+          this.socket.disconnect();
+          this.socket = null;
+        }
+        this.isAuthenticated = false;
+        this.connectionPromise = null;
+      }
     }
     
     // Socket not connected - try to connect first, but don't throw error
@@ -832,14 +987,43 @@ class ChatService {
       // Load messages from local storage
       const messages = await messageStorageService.getMessages(chatId);
       
-      // Filter out deleted messages
-      const visibleMessages = messages.filter(msg => !msg.isDeleted);
+      // Filter out deleted messages and unsent messages (status 'sending' or 'pending')
+      // This ensures unsent messages don't appear in the chat view
+      const visibleMessages = messages.filter(msg => {
+        if (msg.isDeleted) return false;
+        // Filter out messages with 'sending' or 'pending' status (unsent messages)
+        const status = msg.status || 'sent';
+        return status !== 'sending' && status !== 'pending';
+      });
       
-      // Sort by createdAt (oldest first) - WhatsApp style
+      // Sort by timestamp (oldest first) - WhatsApp style
+      // Use consistent timestamp field for perfect chronological ordering
+      const getMessageTimestamp = (msg: Message): number => {
+        // Prefer sentAt (when message was actually sent) over createdAt
+        const timestamp = msg.sentAt || msg.createdAt;
+        if (!timestamp) return 0;
+        const date = new Date(timestamp).getTime();
+        return isNaN(date) ? 0 : date;
+      };
+      
       return visibleMessages.sort((a, b) => {
-        const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
-        const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
-        return dateA - dateB;
+        const dateA = getMessageTimestamp(a);
+        const dateB = getMessageTimestamp(b);
+        
+        // Primary sort: by timestamp (ascending - oldest first)
+        if (dateA !== dateB) {
+          return dateA - dateB;
+        }
+        
+        // Secondary sort: by message ID (stable sort for messages at same timestamp)
+        const idA = (a.id || '').toString();
+        const idB = (b.id || '').toString();
+        if (idA && idB) {
+          return idA.localeCompare(idB);
+        }
+        
+        // Tertiary sort: by content (safety fallback)
+        return (a.content || '').localeCompare(b.content || '');
       });
     } catch (error) {
       console.error('Error getting messages:', error);

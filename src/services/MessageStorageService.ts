@@ -56,11 +56,33 @@ class MessageStorageService {
         }
       }
       
-      // Sort by createdAt (oldest first)
+      // Sort by timestamp (oldest first) - use consistent timestamp field for perfect ordering
+      // Prefer sentAt (when message was sent) over createdAt for accurate chronological order
+      const getMessageTimestamp = (msg: Message): number => {
+        const timestamp = msg.sentAt || msg.createdAt;
+        if (!timestamp) return 0;
+        const date = new Date(timestamp).getTime();
+        return isNaN(date) ? 0 : date;
+      };
+      
       return allMessages.sort((a: Message, b: Message) => {
-        const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
-        const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
-        return dateA - dateB;
+        const dateA = getMessageTimestamp(a);
+        const dateB = getMessageTimestamp(b);
+        
+        // Primary sort: by timestamp (ascending - oldest first)
+        if (dateA !== dateB) {
+          return dateA - dateB;
+        }
+        
+        // Secondary sort: by message ID (stable sort for messages at same timestamp)
+        const idA = (a.id || '').toString();
+        const idB = (b.id || '').toString();
+        if (idA && idB) {
+          return idA.localeCompare(idB);
+        }
+        
+        // Tertiary sort: by content (safety fallback)
+        return (a.content || '').localeCompare(b.content || '');
       });
     } catch (error) {
       console.error('Error getting messages:', error);
@@ -84,10 +106,24 @@ class MessageStorageService {
         messages[existingIndex] = message;
       } else {
         messages.push(message);
+        // Sort using consistent timestamp for perfect ordering
+        const getMessageTimestamp = (msg: Message): number => {
+          const timestamp = msg.sentAt || msg.createdAt;
+          if (!timestamp) return 0;
+          const date = new Date(timestamp).getTime();
+          return isNaN(date) ? 0 : date;
+        };
+        
         messages.sort((a, b) => {
-          const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
-          const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
-          return dateA - dateB;
+          const dateA = getMessageTimestamp(a);
+          const dateB = getMessageTimestamp(b);
+          if (dateA !== dateB) {
+            return dateA - dateB;
+          }
+          // Stable sort by ID if timestamps equal
+          const idA = (a.id || '').toString();
+          const idB = (b.id || '').toString();
+          return idA.localeCompare(idB);
         });
       }
       await this.saveMessages(message.chatId, messages);
