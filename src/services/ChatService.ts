@@ -154,7 +154,8 @@ class ChatService {
     if (rawId && this.recentNewMessageIds.has(rawId)) return;
     if (rawId) {
       this.recentNewMessageIds.add(rawId);
-      setTimeout(() => { this.recentNewMessageIds.delete(rawId); }, 6000);
+      // 5 min dedupe: avoid double-processing when same message arrives via socket then fetchPending
+      setTimeout(() => { this.recentNewMessageIds.delete(rawId); }, 300000);
     }
     try {
       console.log('📥 RECEIVED NEW MESSAGE!', { id: rawId, chatId: messageData.chatId || messageData.chat_id, senderId: messageData.senderId || messageData.sender_id, receiverId: messageData.receiverId || messageData.receiver_id });
@@ -216,21 +217,70 @@ class ChatService {
     }
   }
 
-  /** Fetch pending messages from REST (cross-instance / socket-missed). Call on connect and AppState active. */
+  /**
+   * Fetch pending messages from REST (cross-instance / receiver was offline).
+   * Best-effort only. Real-time chat works without this when both devices are
+   * connected to the same server (no DB needed for that path).
+   */
   async fetchPendingMessages(): Promise<void> {
-    try {
-      const {deviceService} = await import('./DeviceService');
-      const {deviceId} = await deviceService.getDeviceInfo();
-      const url = getApiUrl(`/api/messages/pending?deviceId=${encodeURIComponent(deviceId)}`);
-      const res = await axios.get<{pending?: any[]}>(url, { timeout: 15000 });
-      const list = res?.data?.pending;
-      if (!Array.isArray(list) || list.length === 0) return;
-      console.log(`📥 Fetching ${list.length} pending message(s) from REST`);
-      for (const m of list) {
-        await this.processIncomingMessage(m);
+    const {deviceService} = await import('./DeviceService');
+    const {deviceId} = await deviceService.getDeviceInfo();
+    const url = getApiUrl(`/api/messages/pending?deviceId=${encodeURIComponent(deviceId)}`);
+    const maxRetries = 3;
+    const retryDelayMs = 2000;
+
+    const doFetch = async (): Promise<{pending?: any[]; error?: string} | null> => {
+      try {
+        const res = await axios.get<{pending?: any[]; error?: string}>(url, {
+          timeout: 20000,
+          validateStatus: () => true,
+        });
+        return res?.data ?? null;
+      } catch (e: any) {
+        throw e;
       }
-    } catch (e) {
-      // non-fatal
+    };
+
+    const doNativeFetch = (): Promise<{pending?: any[]; error?: string}> =>
+      new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('timeout')), 20000);
+        fetch(url, { method: 'GET' })
+          .then(r => r.json().catch(() => ({})))
+          .then(d => { clearTimeout(t); resolve(d); })
+          .catch(e => { clearTimeout(t); reject(e); });
+      });
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        let data: {pending?: any[]; error?: string} | null = null;
+        try {
+          data = await doFetch();
+        } catch (axErr: any) {
+          if (attempt === 1) {
+            try { data = await doNativeFetch(); } catch (_) {}
+          }
+          if (!data) throw axErr;
+        }
+        const list = data?.pending;
+        if (!Array.isArray(list) || list.length === 0) {
+          if (data?.error) console.warn('📥 fetchPending: API error:', data.error);
+          return;
+        }
+        console.log(`📥 fetchPending: got ${list.length} message(s) for device ${deviceId.slice(0, 8)}...`);
+        for (const m of list) {
+          await this.processIncomingMessage(m);
+        }
+        console.log(`📥 fetchPending: processed ${list.length} message(s), chat list should update`);
+        return;
+      } catch (e: any) {
+        const isNetwork = /network|timeout|econnaborted|enotfound|econnrefused/i.test(String(e?.message || e));
+        if (attempt < maxRetries && isNetwork) {
+          await new Promise(r => setTimeout(r, retryDelayMs));
+          continue;
+        }
+        console.warn('📥 fetchPending error (best-effort, chat works via socket without this):', e?.message || e);
+        return;
+      }
     }
   }
 

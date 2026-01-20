@@ -594,7 +594,7 @@ const ChatDetailScreen: React.FC = () => {
         return;
       }
       
-      console.log('✅ Message is for this chat, displaying it');
+      console.log('✅ Message is for this chat, displaying it!!!!!', message);
       
       // Normalize message chatId to match current chatId format
       if (message.chatId && normalizedMessageChatId === normalizedCurrentChatId) {

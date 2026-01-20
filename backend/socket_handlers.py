@@ -384,19 +384,21 @@ def register_socket_handlers(socketio_instance):
             
             if not receiver_actual_device_id:
                 print(f"⚠️ Receiver device not found. Will use code room: code_{receiver_unique_code}")
-                # Persist to MongoDB for cross-instance delivery (receiver on different instance)
-                pend_device = receiver_device_id_from_data or (receiver_id if receiver_id and len(receiver_id) > 10 else None)
-                if pend_device:
-                    try:
-                        PendingMessage(
-                            receiver_device_id=pend_device,
-                            message_dict=message_dict,
-                            created_at=datetime.utcnow()
-                        ).save()
-                        print(f"📥 Saved to MongoDB pending_messages for device {pend_device} (cross-instance)")
-                    except Exception as e:
-                        print(f"⚠️ Failed to save pending to MongoDB: {e}")
-            
+
+            # ALWAYS save to PendingMessage when we have a receiver device id (backup for fetchPending)
+            # Handles: receiver on different Render instance, receiver not connected, or socket emit missed
+            pend_device = receiver_device_id_from_data or (receiver_id if receiver_id and len(str(receiver_id)) > 10 else None)
+            if pend_device:
+                try:
+                    PendingMessage(
+                        receiver_device_id=pend_device,
+                        message_dict=message_dict,
+                        created_at=datetime.utcnow()
+                    ).save()
+                    print(f"📥 Saved to MongoDB pending_messages for device {pend_device} (backup for fetchPending)")
+                except Exception as e:
+                    print(f"⚠️ Failed to save pending to MongoDB: {e}")
+
             # CRITICAL: DELIVER MESSAGE FIRST (works without MongoDB)
             print(f"🚀 DELIVERING MESSAGE IMMEDIATELY (MongoDB-independent):")
             join_room(f'chat_{chat_id_str}')
