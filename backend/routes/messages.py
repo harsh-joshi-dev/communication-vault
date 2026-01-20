@@ -15,7 +15,8 @@ messages_bp = Blueprint('messages', __name__)
 
 @messages_bp.route('/pending', methods=['GET'])
 def get_pending_messages():
-    """Get pending messages for a device (receiver was offline). No JWT; deviceId in query. Cross-instance fallback."""
+    """Get pending messages for a device (receiver was offline). No JWT; deviceId in query.
+    Returns {pending: []} when MongoDB is not configured — chat works without DB via socket."""
     try:
         device_id = (request.args.get('deviceId') or '').strip()
         if not device_id:
@@ -30,7 +31,8 @@ def get_pending_messages():
             d.delete()
         return jsonify({'pending': pending}), 200
     except Exception as e:
-        return jsonify({'pending': [], 'error': str(e)}), 200
+        # Mongo not configured / not connected: return [] without error (chat works via socket without DB)
+        return jsonify({'pending': []}), 200
 
 @messages_bp.route('/chats', methods=['GET'])
 @jwt_required()
