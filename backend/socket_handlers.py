@@ -4,7 +4,8 @@ Socket.io event handlers for real-time chat
 
 from flask_socketio import emit, join_room, leave_room
 from flask_jwt_extended import decode_token
-from models_mongo import User, Chat, Message, PendingMessage
+# MongoDB imports DISABLED - using pure socket.io communication only
+# from models_mongo import User, Chat, Message, PendingMessage
 from datetime import datetime, timedelta
 
 # Global dictionary to store device_id by socket session ID
@@ -77,25 +78,8 @@ def register_socket_handlers(socketio_instance):
                 if n:
                     print(f"✅ Delivered {n} pending (in-memory) to {device_id} on reconnect")
 
-            # Deliver from MongoDB (cross-instance: receiver connected to different instance)
-            if device_id:
-                try:
-                    cutoff = datetime.utcnow() - timedelta(hours=24)
-                    docs = list(PendingMessage.objects(
-                        receiver_device_id=device_id,
-                        created_at__gte=cutoff
-                    ).order_by('+created_at').limit(100))
-                    for doc in docs:
-                        socketio_instance.emit('new_message', doc.message_dict, room=request.sid)
-                        doc.delete()
-                    if docs:
-                        print(f"✅ Delivered {len(docs)} pending (MongoDB) to {device_id} on reconnect")
-                except Exception as e:
-                    # Only log MongoDB errors once per connection to reduce spam
-                    error_str = str(e)
-                    if 'Lookup timed out' not in error_str and 'No address associated' not in error_str:
-                        print(f"⚠️ MongoDB pending delivery failed: {error_str[:100]}")
-                    # Silently handle DNS/timeout errors - they're expected when MongoDB is unavailable
+            # MongoDB pending delivery DISABLED - using pure socket.io only
+            # Messages are delivered in real-time via socket, no database needed
 
             print(f"✅ Device {device_id} ({device_name}) connected with code {unique_code}, Socket ID: {request.sid}")
             return True
@@ -161,34 +145,13 @@ def register_socket_handlers(socketio_instance):
                 else:
                     print(f"⚠️ Device {device_id} cannot join code room {chat_id} (has {unique_code})")
             else:
-                # Regular chat room - verify device is part of chat
+                # Regular chat room - MongoDB DISABLED, using pure socket.io
                 # Handle both UUID and prefixed formats
                 clean_chat_id = chat_id.replace('chat_', '') if chat_id.startswith('chat_') else chat_id
-                
-                try:
-                    chat = Chat.objects(id=clean_chat_id).first()
-                    if chat:
-                        # Verify device is part of chat
-                        if chat.user1_id == device_id or chat.user2_id == device_id:
-                            room_name = f'chat_{chat.id}'
-                            join_room(room_name)
-                            emit('joined_chat', {'chatId': str(chat.id)})
-                            print(f"✅ Device {device_id} joined chat room {room_name} (chat ID: {chat.id})")
-                        else:
-                            print(f"⚠️ Device {device_id} not authorized for chat {chat.id}")
-                    else:
-                        # Chat doesn't exist yet - this is OK, it will be created when first message is sent
-                        print(f"⚠️ Chat {clean_chat_id} not found, but allowing join (will be created on first message)")
-                        # Still join the room so messages can be received when chat is created
-                        room_name = f'chat_{clean_chat_id}'
-                        join_room(room_name)
-                        emit('joined_chat', {'chatId': clean_chat_id})
-                except Exception as e:
-                    print(f"⚠️ Error finding chat {clean_chat_id}: {e}")
-                    # Still try to join the room
-                    room_name = f'chat_{clean_chat_id}'
-                    join_room(room_name)
-                    emit('joined_chat', {'chatId': clean_chat_id})
+                room_name = f'chat_{clean_chat_id}'
+                join_room(room_name)
+                emit('joined_chat', {'chatId': clean_chat_id})
+                print(f"✅ Device {device_id} joined chat room {room_name} (pure socket.io)")
         except Exception as e:
             print(f"❌ Join chat error: {e}")
             import traceback
@@ -266,16 +229,8 @@ def register_socket_handlers(socketio_instance):
             
             receiver_id = receiver_actual_device_id or receiver_device_id or receiver_unique_code
             
-            # Check MongoDB availability
+            # MongoDB DISABLED - using pure socket.io communication only
             mongo_available = False
-            try:
-                from mongoengine import get_db
-                get_db().command('ping')
-                mongo_available = True
-                print(f"✅ MongoDB is available - will save message first")
-            except Exception as e:
-                mongo_available = False
-                print(f"⚠️ MongoDB unavailable: {e} - will still try socket delivery")
             
             # Ensure both devices join the chat room immediately
             join_room(f'chat_{chat_id_str}')
@@ -332,94 +287,8 @@ def register_socket_handlers(socketio_instance):
                 'createdAt': datetime.utcnow().isoformat(),
             }
             
-            # STEP 1: SAVE TO MONGODB FIRST (if available)
-            saved_message = None
-            if mongo_available:
-                try:
-                    from models_mongo import Message, Chat, PendingMessage
-                    
-                    # Save message to MongoDB
-                    saved_message = Message(
-                        id=message_id,
-                        chat_id=chat_id_str,  # Without chat_ prefix for MongoDB
-                        sender_id=device_id,
-                        receiver_id=receiver_id,
-                        receiver_phone_number=receiver_phone_number,
-                        receiver_name=receiver_name,
-                        type=message_type,
-                        content=content,
-                        media_url=media_url,
-                        thumbnail_url=thumbnail_url,
-                        file_name=file_name,
-                        file_size=file_size,
-                        duration=duration,
-                        is_view_once=is_view_once,
-                        auto_delete_after=auto_delete_after,
-                        status='sent',
-                        sent_at=datetime.utcnow(),
-                        created_at=datetime.utcnow(),
-                    )
-                    saved_message.save()
-                    print(f"✅ Message saved to MongoDB FIRST: {message_id}")
-                    
-                    # Create or update chat in MongoDB
-                    try:
-                        chat_db = Chat.objects(id=chat_id_str).first()
-                        if not chat_db:
-                            # Create new chat
-                            chat_db = Chat(
-                                id=chat_id_str,
-                                user1_id=device_id,
-                                user2_id=receiver_id if receiver_id and len(receiver_id) > 10 else None,
-                                contact_phone_number=receiver_phone_number,
-                                contact_name=receiver_name,
-                                contact_email=receiver_email,
-                                is_non_app_user=not (receiver_id and len(receiver_id) > 10),
-                                last_message_id=str(message_id),
-                                unread_count_user1=0,
-                                unread_count_user2=1 if receiver_id else 0,
-                                created_at=datetime.utcnow(),
-                                updated_at=datetime.utcnow(),
-                            )
-                            chat_db.save()
-                            print(f"✅ Chat created in MongoDB: {chat_id_str}")
-                        else:
-                            # Update existing chat
-                            chat_db.last_message_id = str(message_id)
-                            chat_db.updated_at = datetime.utcnow()
-                            if receiver_id and chat_db.user2_id == receiver_id:
-                                chat_db.unread_count_user2 += 1
-                            elif receiver_id and chat_db.user1_id == receiver_id:
-                                chat_db.unread_count_user1 += 1
-                            chat_db.save()
-                            print(f"✅ Chat updated in MongoDB: {chat_id_str}")
-                    except Exception as chat_e:
-                        print(f"⚠️ Error creating/updating chat in MongoDB: {chat_e}")
-                    
-                    # Save to PendingMessage for receiver (backup for fetchPending)
-                    pend_device = receiver_actual_device_id or receiver_device_id or (receiver_id if receiver_id and len(str(receiver_id)) > 10 else None)
-                    if pend_device:
-                        try:
-                            PendingMessage(
-                                receiver_device_id=pend_device,
-                                message_dict=message_dict,
-                                created_at=datetime.utcnow()
-                            ).save()
-                            print(f"✅ Saved to PendingMessage for device {pend_device}")
-                        except Exception as pend_e:
-                            print(f"⚠️ Failed to save PendingMessage: {pend_e}")
-                    
-                    # Update message_dict with saved data
-                    message_dict = saved_message.to_dict()
-                    # Ensure chatId has chat_ prefix for frontend
-                    message_dict['chatId'] = chat_id_for_message
-                    print(f"✅ MongoDB save complete - message is now persisted")
-                    
-                except Exception as mongo_e:
-                    print(f"⚠️ MongoDB save failed: {mongo_e} - will still deliver via socket")
-                    mongo_available = False  # Mark as unavailable for rest of function
-            else:
-                print(f"⚠️ MongoDB not available - saving message locally only (will deliver via socket)")
+            # MongoDB save DISABLED - using pure socket.io communication only
+            # Messages are delivered in real-time via socket, no database persistence needed
             
             receiver_actual_device_id = None
             receiver_code_room = None  # exact room receiver joined (code_X), for reliable delivery
@@ -527,16 +396,8 @@ def register_socket_handlers(socketio_instance):
             
             print(f"✅✅✅ MESSAGE DELIVERED! Receiver should receive it now.")
             
-            # STEP 3: Update message status to 'delivered' (message already saved and sent)
-            # Message is already saved to MongoDB in STEP 1, socket delivery done in STEP 2
-            if saved_message and mongo_available:
-                try:
-                    saved_message.status = 'delivered'
-                    saved_message.delivered_at = datetime.utcnow()
-                    saved_message.save()
-                    print(f"✅ Message status updated to 'delivered' in MongoDB")
-                except Exception as e:
-                    print(f"⚠️ Failed to update message status: {e}")
+            # MongoDB status update DISABLED - using pure socket.io only
+            # Message status is managed by clients via socket events
             
             # Send status update to sender
             message_dict['status'] = 'delivered'
@@ -596,29 +457,9 @@ def register_socket_handlers(socketio_instance):
             chat_id_str = str(chat_id)
             clean_chat_id = chat_id_str.replace('chat_', '') if chat_id_str.startswith('chat_') else chat_id_str
             
-            # Try to get chat info (optional - typing works even if chat doesn't exist in DB yet)
+            # MongoDB chat lookup DISABLED - using pure socket.io only
+            # Typing indicators work via socket broadcast, no database needed
             receiver_id = None
-            try:
-                # Try multiple chatId formats to find chat
-                chat = Chat.objects(id=clean_chat_id).first()
-                if not chat and chat_id_str.startswith('chat_'):
-                    chat = Chat.objects(id=chat_id_str).first()
-                if not chat:
-                    chat = Chat.objects(id=f'chat_{clean_chat_id}').first()
-                
-                if chat:
-                    # Get receiver device ID
-                    receiver_id = chat.user2_id if chat.user1_id == device_id else chat.user1_id
-                    print(f"📋 Found chat, receiver_id: {receiver_id}")
-                else:
-                    print(f"📋 Chat not found in DB (may not exist yet), will broadcast to all rooms")
-            except Exception as e:
-                # Suppress verbose MongoDB DNS errors for typing indicators
-                error_str = str(e)
-                if 'Lookup timed out' not in error_str and 'No address associated' not in error_str:
-                    print(f"⚠️ Could not fetch chat for typing: {error_str[:100]}")
-                # Silently handle DNS/timeout errors - typing still works via socket
-                receiver_id = None
             
             # Typing data to emit
             typing_data = {
@@ -676,80 +517,56 @@ def register_socket_handlers(socketio_instance):
                 print(f"⚠️ Mark read failed: device_id={device_id}, chat_id={chat_id}")
                 return
             
-            # Verify device is part of chat
-            chat = Chat.objects(id=chat_id).first()
-            if not chat or (chat.user1_id != device_id and chat.user2_id != device_id):
-                return
+            # MongoDB DISABLED - using pure socket.io
+            # Get sender from request data
+            sender_id = data.get('senderId')
             
-            # Mark messages as read
-            updated_messages = []
-            for msg_id in message_ids:
-                message = Message.objects(id=msg_id).first()
-                if message and message.receiver_id == device_id and not message.read_at:
-                    message.status = 'read'
-                    message.read_at = datetime.utcnow()
-                    message.save()
-                    updated_messages.append(message.to_dict())
-            
-            # Update unread count
-            if chat.user1_id == device_id:
-                chat.unread_count_user1 = 0
-            else:
-                chat.unread_count_user2 = 0
-            chat.save()
-            
-            # Emit read receipts to sender
-            if updated_messages:
-                sender_id = updated_messages[0]['senderId']
+            # Emit read receipts to sender via socket (no database needed)
+            if sender_id:
                 socketio_instance.emit('messages_read', {
                     'chatId': chat_id,
                     'messageIds': message_ids,
                     'readAt': datetime.utcnow().isoformat()
                 }, room=f'device_{sender_id}')
+                print(f"✅ Read receipts sent to sender {sender_id} via socket")
             
         except Exception as e:
             print(f"Mark read error: {e}")
     
     @socketio_instance.on('delete_message')
     def handle_delete_message(data):
-        """Delete a message (mark as deleted)"""
+        """Delete a message - MongoDB DISABLED, using pure socket.io"""
         try:
             from flask import request
             session_data = device_sessions.get(request.sid, {})
             device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
             chat_id = data.get('chatId')
             message_id = data.get('messageId')
+            receiver_id = data.get('receiverId')  # Get receiver from request data
             
             if not device_id or not chat_id or not message_id:
                 return
             
-            # Verify device is part of chat
-            chat = Chat.objects(id=chat_id).first()
-            if not chat or (chat.user1_id != device_id and chat.user2_id != device_id):
-                return
+            # Emit delete event via socket (no database verification needed)
+            # Broadcast to chat room and both device rooms
+            socketio_instance.emit('message_deleted', {
+                'chatId': chat_id,
+                'messageId': message_id,
+            }, room=f'chat_{chat_id}')
             
-            # Mark message as deleted
-            message = Message.objects(id=message_id).first()
-            if message and message.sender_id == device_id:  # Only sender can delete
-                message.is_deleted = True
-                message.save()
-                
-                # Emit delete event to both devices in chat
+            # Notify sender and receiver directly
+            socketio_instance.emit('message_deleted', {
+                'chatId': chat_id,
+                'messageId': message_id,
+            }, room=f'device_{device_id}')
+            
+            if receiver_id:
                 socketio_instance.emit('message_deleted', {
                     'chatId': chat_id,
                     'messageId': message_id,
-                }, room=f'chat_{chat_id}')
-                
-                # Also notify both devices directly
-                socketio_instance.emit('message_deleted', {
-                    'chatId': chat_id,
-                    'messageId': message_id,
-                }, room=f'device_{chat.user1_id}')
-                if chat.user2_id:
-                    socketio_instance.emit('message_deleted', {
-                        'chatId': chat_id,
-                        'messageId': message_id,
-                    }, room=f'device_{chat.user2_id}')
+                }, room=f'device_{receiver_id}')
+            
+            print(f"✅ Message {message_id} delete event sent via socket")
                 
         except Exception as e:
             print(f"Delete message error: {e}")

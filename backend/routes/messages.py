@@ -15,21 +15,17 @@ messages_bp = Blueprint('messages', __name__)
 
 @messages_bp.route('/pending', methods=['GET'])
 def get_pending_messages():
-    """Get pending messages for a device (receiver was offline). No JWT; deviceId in query.
-    Returns {pending: []} when MongoDB is not configured — chat works without DB via socket."""
+    """Get pending messages - MongoDB DISABLED, using pure socket.io only.
+    Returns empty array - messages are delivered in real-time via socket."""
     try:
         device_id = (request.args.get('deviceId') or '').strip()
-        if not device_id:
-            return jsonify({'pending': []}), 200
-        cutoff = datetime.utcnow() - timedelta(hours=24)
-        docs = list(PendingMessage.objects(
-            receiver_device_id=device_id,
-            created_at__gte=cutoff
-        ).order_by('+created_at').limit(100))
-        pending = [d.message_dict for d in docs]
-        for d in docs:
-            d.delete()
-        return jsonify({'pending': pending}), 200
+        # MongoDB DISABLED - all messages delivered via socket.io in real-time
+        # Return empty array - no pending messages stored in database
+        return jsonify({'pending': []}), 200
+        
+        # DISABLED: MongoDB pending messages code below
+        # All messages are delivered in real-time via socket.io
+        return jsonify({'pending': []}), 200
     except Exception as e:
         # Mongo not configured / not connected: return [] without error (chat works via socket without DB)
         return jsonify({'pending': []}), 200

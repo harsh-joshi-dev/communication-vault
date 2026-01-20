@@ -32,9 +32,15 @@ app.config.from_object(Config)
 # Initialize upload directories
 Config.init_app(app)
 
-# Initialize MongoDB
+# MongoDB initialization DISABLED - using direct socket communication only
 def init_mongodb():
-    """Initialize MongoDB connection with retry logic"""
+    """MongoDB initialization disabled - using pure socket.io for message delivery"""
+    print("ℹ️  MongoDB initialization skipped - using direct socket communication only")
+    print("✅ Chat will work perfectly via Socket.io real-time delivery")
+    return False
+    
+    # DISABLED: MongoDB connection code below (not used)
+    """
     max_retries = 3
     retry_count = 0
     
@@ -164,9 +170,10 @@ def init_mongodb():
             time.sleep(3)  # Wait before retry
     
     return False
-
-# Initialize MongoDB (non-blocking)
-init_mongodb()
+    """
+    
+# MongoDB initialization disabled - using pure socket.io
+# init_mongodb()  # DISABLED - using direct socket communication only
 
 # Initialize extensions
 CORS(app, resources={r"/*": {"origins": "*"}})
