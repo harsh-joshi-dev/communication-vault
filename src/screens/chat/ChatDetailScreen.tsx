@@ -61,12 +61,15 @@ const ChatDetailScreen: React.FC = () => {
   // Reload messages and chat name when screen comes into focus (like WhatsApp)
   useFocusEffect(
     React.useCallback(() => {
-      // Load messages every time screen is focused
       loadMessages();
-      // Load chat name from storage
       loadChatName();
-      // Mark chat as read when opening
       chatStorageService.markChatAsRead(chatId);
+      // Fetch pending (catches cross-instance / missed socket) so messages appear on emulator
+      chatService.fetchPendingMessages().catch(() => {});
+      const pendingInterval = setInterval(() => {
+        chatService.fetchPendingMessages().catch(() => {});
+      }, 10000);
+      return () => { clearInterval(pendingInterval); };
     }, [chatId])
   );
 

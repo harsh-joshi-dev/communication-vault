@@ -168,13 +168,19 @@ register_socket_handlers(socketio)
 def health_check():
     """Health check endpoint for Render"""
     try:
-        # Check MongoDB connection
         from mongoengine import get_db
         db = get_db()
         db.command('ping')
         return {'status': 'ok', 'message': 'Server is running', 'database': 'connected'}, 200
     except Exception as e:
-        return {'status': 'ok', 'message': 'Server is running', 'database': 'disconnected', 'error': str(e)}, 200
+        err = str(e)
+        if 'You have not defined a default connection' in err or 'default connection' in err.lower():
+            err = (
+                'MongoDB never connected at startup. Set MONGODB_URI in Render Environment (Dashboard → Service → Environment) '
+                'to: mongodb+srv://USER:PASSWORD@clusterone.zksoinv.mongodb.net/stealth_vault?retryWrites=true&w=majority '
+                'with your Atlas user and NEW password, then redeploy. Also ensure 0.0.0.0/0 in Atlas Network Access.'
+            )
+        return {'status': 'ok', 'message': 'Server is running', 'database': 'disconnected', 'error': err}, 200
 
 @app.route('/', methods=['GET'])
 def root():

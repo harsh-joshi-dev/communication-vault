@@ -48,12 +48,16 @@ const ChatsScreen: React.FC = () => {
     return () => sub.remove();
   }, []);
 
-  // Load chats when screen is focused + connect + typing + periodic refresh
+  // Load chats when screen is focused + connect + fetch pending + typing + periodic refresh
   useFocusEffect(
     useCallback(() => {
       console.log('📱 ChatsScreen: Screen focused, loading chats...');
-      chatService.connect().then(() => { loadChats(); }).catch(() => {
+      chatService.connect().then(() => {
         loadChats();
+        chatService.fetchPendingMessages().catch(() => {});
+      }).catch(() => {
+        loadChats();
+        chatService.fetchPendingMessages().catch(() => {});
         setTimeout(() => chatService.connect().catch(() => {}), 3000);
       });
 
@@ -161,13 +165,17 @@ const ChatsScreen: React.FC = () => {
         }
       }, 1000);
       
-      // Periodic refresh (every 5 seconds) to catch missed updates; 2s was too aggressive
+      // Periodic refresh: loadChats every 5s; fetchPending every 10s (catches cross-instance / missed socket)
       const refreshInterval = setInterval(() => loadChats(true), 5000);
-      
+      const pendingInterval = setInterval(() => {
+        chatService.fetchPendingMessages().catch(() => {});
+      }, 10000);
+
       return () => {
         if (typingUnsubscribe) typingUnsubscribe();
         if (typingSetupTimeout) clearTimeout(typingSetupTimeout);
         if (refreshInterval) clearInterval(refreshInterval);
+        if (pendingInterval) clearInterval(pendingInterval);
       };
     }, [])
   );
@@ -317,6 +325,7 @@ const ChatsScreen: React.FC = () => {
           data={chats}
           renderItem={renderChatItem}
           keyExtractor={item => item.id}
+          extraData={chats}
           contentContainerStyle={styles.listContent}
           refreshing={loading}
           onRefresh={loadChats}
