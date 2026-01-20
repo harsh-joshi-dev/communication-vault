@@ -177,7 +177,11 @@ const ChatsScreen: React.FC = () => {
       const loadedChats = await chatStorageService.getChats();
       setChats(loadedChats);
       if (loadedChats.length === 0) {
-        setTimeout(() => { chatStorageService.getChats().then(c => { if (c.length > 0) setChats(c); }); }, 400);
+        [400, 800, 1400].forEach((ms) => {
+          setTimeout(() => {
+            chatStorageService.getChats().then((c) => { if (c.length > 0) setChats(c); });
+          }, ms);
+        });
       }
     } catch (error) {
       console.error('❌ Error loading chats:', error);

@@ -34,8 +34,10 @@ class ChatStorageService {
         chats = await doGet();
       }
       if (chats.length === 0) {
-        return [];
+        await new Promise(r => setTimeout(r, 500));
+        chats = await doGet();
       }
+      if (chats.length === 0) return [];
 
       // Sort by updatedAt (most recent first)
       const sorted = chats.sort((a: Chat, b: Chat) => {

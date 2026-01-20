@@ -246,6 +246,9 @@ class ChatService {
           try { listener(message); } catch (e) { console.error(`Message listener ${i} error:`, e); }
         });
         console.log('✅ All listeners notified');
+        // Delayed chat list refresh so ChatsScreen can read after EncryptedStorage settles (receiver may get [] on first load)
+        setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 400);
+        setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 900);
       } catch (error: any) {
         console.error('❌ CRITICAL: Error handling new message:', error);
         console.error('Error stack:', error.stack);

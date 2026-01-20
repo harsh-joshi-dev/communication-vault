@@ -356,16 +356,16 @@ def register_socket_handlers(socketio_instance):
             socketio_instance.emit('new_message', message_dict, room=f'chat_{chat_id_str}')
             print(f"   ✅ [1/6] Emitted to chat room: chat_{chat_id_str}")
             
-            # 2. Emit to receiver ONCE: prefer device_ when we have it, else code_ (avoids duplicate delivery)
+            # 2. Emit to receiver: device_ and code_ (client dedupes; improves delivery when one room is missed)
             if receiver_actual_device_id:
                 socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_actual_device_id}')
-                print(f"📤 [2] Emitted to device room: device_{receiver_actual_device_id}")
-            elif receiver_code_room:
+                print(f"📤 [2a] Emitted to device room: device_{receiver_actual_device_id}")
+            if receiver_code_room:
                 socketio_instance.emit('new_message', message_dict, room=receiver_code_room)
-                print(f"📤 [2] Emitted to code room: {receiver_code_room}")
-            elif receiver_unique_code:
+                print(f"📤 [2b] Emitted to code room: {receiver_code_room}")
+            elif receiver_unique_code and not receiver_actual_device_id:
                 socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_unique_code}')
-                print(f"📤 [2] Emitted to code room (fallback): code_{receiver_unique_code}")
+                print(f"📤 [2b] Emitted to code room (fallback): code_{receiver_unique_code}")
 
             # 3. Fallback: receiver from request data (when 2 did not apply)
             if receiver_device_id_from_data and receiver_device_id_from_data != receiver_unique_code and receiver_device_id_from_data != receiver_actual_device_id:
