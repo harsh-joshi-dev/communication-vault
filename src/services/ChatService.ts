@@ -29,6 +29,7 @@ class ChatService {
   }) => void)[] = [];
   private deletedChatIdListeners: ((chatId: string) => void)[] = [];
   private recentNewMessageIds: Set<string> = new Set();
+  private lastFetchPendingErrorLog = 0;
 
   get socketInstance(): Socket | null {
     return this.socket;
@@ -45,105 +46,116 @@ class ChatService {
       return this.connectionPromise;
     }
 
-    // Start new connection
-    this.connectionPromise = new Promise(async (resolve, reject) => {
+    const maxAttempts = 4;
+    const authTimeoutMs = 90000;
+    const retryDelayMs = 5000;
+
+    this.connectionPromise = (async () => {
+      let deviceInfo: {deviceId: string; uniqueCode: string; deviceName: string};
       try {
-        const deviceInfo = await deviceService.getDeviceInfo();
-        const apiUrl = getApiBaseUrl();
-
-        console.log(`🔌 Connecting to chat server: ${apiUrl}`);
-
-        // Disconnect existing socket if any
-        if (this.socket) {
-          this.socket.removeAllListeners();
-          this.socket.disconnect();
-          this.socket = null;
-        }
-
-        this.isAuthenticated = false;
-
-        // Create socket with configuration optimized for Render cold starts
-        this.socket = io(apiUrl, {
-          auth: {
-            deviceId: deviceInfo.deviceId,
-            uniqueCode: deviceInfo.uniqueCode,
-            deviceName: deviceInfo.deviceName,
-          },
-          transports: ['polling', 'websocket'],
-          reconnection: true,
-          reconnectionAttempts: Infinity,
-          reconnectionDelay: 1000,
-          reconnectionDelayMax: 8000,
-          timeout: 45000,
-          forceNew: false,
-        });
-
-        let authReceived = false;
-
-        // Connection successful
-        this.socket.on('connect', () => {
-          console.log('✅ Socket connected, Socket ID:', this.socket?.id);
-        });
-
-        // Authentication confirmed by server
-        this.socket.on('connected', (data) => {
-          console.log('✅ Authenticated:', data);
-          this.isAuthenticated = true;
-          authReceived = true;
-          
-          // Join device room and unique code room for receiving messages
-          if (this.socket?.connected) {
-            const deviceId = data.deviceId || deviceInfo.deviceId;
-            const uniqueCode = data.uniqueCode || deviceInfo.uniqueCode;
-            
-            // Join device room (for direct messages)
-            this.socket.emit('join_chat', {chatId: `device_${deviceId}`});
-            
-            // Join unique code room (for messages by code)
-            if (uniqueCode) {
-              this.socket.emit('join_chat', {chatId: `code_${uniqueCode}`});
-            }
-            
-            console.log('✅ Joined device and code rooms for receiving messages');
-          }
-
-          // Fetch pending from REST (cross-instance / missed on socket)
-          this.fetchPendingMessages().catch(() => {});
-          
-          if (this.connectionPromise) {
-            this.connectionPromise = null;
-          }
-          resolve();
-        });
-
-        this.socket.on('connect_error', () => {
-          this.isAuthenticated = false;
-        });
-
-        this.socket.on('disconnect', (reason: string) => {
-          this.isAuthenticated = false;
-          if (reason === 'io server disconnect') {
-            this.socket?.connect();
-          }
-        });
-
-        // Set up event listeners
-        this.setupEventListeners();
-
-        setTimeout(() => {
-          if (!this.isAuthenticated && !authReceived && this.connectionPromise) {
-            this.connectionPromise = null;
-            resolve();
-          }
-        }, 60000);
-
+        deviceInfo = await deviceService.getDeviceInfo();
       } catch {
         this.connectionPromise = null;
-        resolve();
+        return;
       }
-    });
+      const apiUrl = getApiBaseUrl();
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          if (attempt === 1) {
+            console.log(`🔌 Connecting (${attempt}/${maxAttempts}): ${apiUrl}`);
+          }
+          await this._doOneConnectAttempt(apiUrl, deviceInfo, authTimeoutMs);
+          this.connectionPromise = null;
+          return;
+        } catch (e: any) {
+          if (attempt < maxAttempts) {
+            // Only log retry on first few attempts to reduce spam
+            if (attempt <= 2) {
+              console.warn(`🔌 Attempt ${attempt} failed, retry in ${retryDelayMs / 1000}s`);
+            }
+            await new Promise(r => setTimeout(r, retryDelayMs));
+          } else {
+            // Only log final failure once to avoid spam
+            console.warn('🔌 Connect failed after', maxAttempts, 'attempts. Messages will sync when server is reachable.');
+            this.connectionPromise = null;
+            return;
+          }
+        }
+      }
+    })();
 
     return this.connectionPromise;
+  }
+
+  private _doOneConnectAttempt(
+    apiUrl: string,
+    deviceInfo: {deviceId: string; uniqueCode: string; deviceName: string},
+    authTimeoutMs: number,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.socket) {
+        this.socket.removeAllListeners();
+        this.socket.disconnect();
+        this.socket = null;
+      }
+      this.isAuthenticated = false;
+
+      const socket = io(apiUrl, {
+        auth: { deviceId: deviceInfo.deviceId, uniqueCode: deviceInfo.uniqueCode, deviceName: deviceInfo.deviceName },
+        transports: ['polling', 'websocket'],
+        reconnection: true,
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 8000,
+        timeout: 45000,
+        forceNew: true,
+      });
+      this.socket = socket;
+
+      let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        timer = null;
+        socket.removeAllListeners();
+        socket.disconnect();
+        if (this.socket === socket) this.socket = null;
+        this.isAuthenticated = false;
+        reject(new Error('Auth timeout'));
+      }, authTimeoutMs);
+
+      socket.on('connect', () => { console.log('✅ Socket connected:', socket.id); });
+
+      socket.on('connected', (data: any) => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        this.isAuthenticated = true;
+        console.log('✅ Authenticated');
+        if (socket.connected) {
+          const did = data.deviceId || deviceInfo.deviceId;
+          const code = data.uniqueCode || deviceInfo.uniqueCode;
+          socket.emit('join_chat', {chatId: `device_${did}`});
+          if (code) socket.emit('join_chat', {chatId: `code_${code}`});
+          console.log('✅ Joined device and code rooms');
+        }
+        // Fetch pending messages immediately after connecting
+        this.fetchPendingMessages().catch(() => {});
+        resolve();
+      });
+
+      socket.on('connect_error', () => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        socket.removeAllListeners();
+        socket.disconnect();
+        if (this.socket === socket) this.socket = null;
+        this.isAuthenticated = false;
+        reject(new Error('Connect error'));
+      });
+
+      socket.on('disconnect', (reason: string) => {
+        this.isAuthenticated = false;
+        if (reason === 'io server disconnect') socket.connect();
+      });
+
+      this.setupEventListeners();
+    });
   }
 
   /**
@@ -181,37 +193,103 @@ class ChatService {
         createdAt: messageData.createdAt || messageData.created_at || new Date().toISOString(),
       };
       const deviceInfo = await deviceService.getDeviceInfo();
-      const isForMe = message.receiverId === deviceInfo.deviceId || message.receiverId === deviceInfo.uniqueCode || message.senderId !== deviceInfo.deviceId;
-      console.log(`📥 Message is for me: ${isForMe} (receiver: ${message.receiverId}, my deviceId: ${deviceInfo.deviceId}, my code: ${deviceInfo.uniqueCode})`);
+      
+      // Message is for me if:
+      // 1. receiverId matches my deviceId or uniqueCode (I'm the receiver)
+      // 2. OR senderId matches my deviceId or uniqueCode (I'm the sender - my own message echoed back)
+      const isReceiverMe = message.receiverId === deviceInfo.deviceId || message.receiverId === deviceInfo.uniqueCode;
+      const isSenderMe = message.senderId === deviceInfo.deviceId || message.senderId === deviceInfo.uniqueCode;
+      
+      // If message comes via socket new_message event, it's already delivered to my room, so it's for me
+      // If message comes via fetchPending, it's already filtered by my deviceId, so it's for me
+      // Process all messages that come through - they should all be for this device
+      console.log(`📥 Processing message: receiver=${message.receiverId || 'none'}, sender=${message.senderId}, my deviceId=${deviceInfo.deviceId}, my code=${deviceInfo.uniqueCode}`);
+      console.log(`   Is receiver me: ${isReceiverMe}, Is sender me: ${isSenderMe}`);
+      
       if (message.chatId && this.socket?.connected && this.isAuthenticated) {
         await this.joinChat(message.chatId);
         console.log('✅ Joined chat room for received message:', message.chatId);
       }
       await messageStorageService.saveMessage(message);
       console.log('✅ Message saved locally');
+      
       try {
         const {chatStorageService} = await import('./ChatStorageService');
         const normalizedChatId = message.chatId?.startsWith('chat_') ? message.chatId : `chat_${message.chatId}`;
-        const messageWithStatus = { ...message, status: message.status || 'delivered' };
-        await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, true);
+        const messageWithStatus = { ...message, chatId: normalizedChatId, status: message.status || 'delivered' };
+        
+        // Determine if message is from me or to me
+        const isFromMe = message.senderId === deviceInfo.deviceId || message.senderId === deviceInfo.uniqueCode;
+        const otherUserId = isFromMe ? message.receiverId : message.senderId;
+        
+        console.log(`📝 Creating/updating chat: ${normalizedChatId}, isFromMe: ${isFromMe}, otherUserId: ${otherUserId}`);
+        
+        // Update or create chat - this ensures chat appears in chat list
+        // incrementUnread should be true only if message is NOT from me (it's from another user)
+        await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, !isFromMe);
         console.log('✅ Chat updated/created with new message:', normalizedChatId);
+        
+        // Notify chat list to refresh immediately
+        this.notifyChatListRefresh();
+        
+        // Also trigger chat listeners with minimal chat data
         const minimalChat: Chat = {
           id: normalizedChatId,
           participantIds: [message.senderId, message.receiverId].filter(Boolean) as string[],
-          otherUser: { id: message.senderId, name: 'Unknown User', isAppUser: true },
+          otherUser: { 
+            id: otherUserId, 
+            name: (message as any).receiverName || (message as any).receiverPhoneNumber || 'Unknown User', 
+            isAppUser: true 
+          },
           lastMessage: messageWithStatus,
           updatedAt: new Date().toISOString(),
-          unreadCount: 1,
+          unreadCount: isFromMe ? 0 : 1, // Only increment unread if message is NOT from me
           isBlocked: false,
           createdAt: new Date().toISOString(),
         };
-        this.chatListeners.forEach((l) => { try { l(minimalChat); } catch (_) {} });
+        
+        // Notify chat listeners
+        this.chatListeners.forEach((l) => { 
+          try { 
+            l(minimalChat); 
+          } catch (err) {
+            console.error('Error in chat listener:', err);
+          }
+        });
+        
+        // Trigger multiple refreshes to ensure UI updates
+        setTimeout(() => { this.notifyChatListRefresh(); }, 100);
+        setTimeout(() => { this.notifyChatListRefresh(); }, 500);
+        setTimeout(() => { this.notifyChatListRefresh(); }, 1000);
+      } catch (e: any) { 
+        console.error('❌ Error updating chat:', e);
+        // Still notify chat list refresh even on error
         this.notifyChatListRefresh();
-      } catch (e: any) { console.error('❌ Error updating chat:', e); }
-      this.messageListeners.forEach((l, i) => { try { l(message); } catch (e) { console.error(`Message listener ${i} error:`, e); } });
-      setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 400);
-      setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 900);
-      setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 1500);
+      }
+      // Notify all message listeners (for ChatDetailScreen)
+      this.messageListeners.forEach((l, i) => { 
+        try { 
+          l(message); 
+        } catch (e) { 
+          console.error(`Message listener ${i} error:`, e); 
+        } 
+      });
+      
+      // Notify chat listeners to refresh chat list (with delays to ensure UI updates)
+      setTimeout(() => { 
+        this.notifyChatListRefresh();
+        this.chatListeners.forEach(l => { 
+          try { 
+            l(minimalChat); 
+          } catch (_) {} 
+        }); 
+      }, 100);
+      setTimeout(() => { 
+        this.notifyChatListRefresh();
+      }, 500);
+      setTimeout(() => { 
+        this.notifyChatListRefresh();
+      }, 1000);
     } catch (e: any) {
       console.error('❌ processIncomingMessage error:', e);
     }
@@ -219,67 +297,92 @@ class ChatService {
 
   /**
    * Fetch pending messages from REST (cross-instance / receiver was offline).
-   * Best-effort only. Real-time chat works without this when both devices are
-   * connected to the same server (no DB needed for that path).
+   * This is critical for receiving messages when socket is disconnected.
+   * Silently handles network errors - server might be temporarily unavailable.
    */
   async fetchPendingMessages(): Promise<void> {
-    const {deviceService} = await import('./DeviceService');
-    const {deviceId} = await deviceService.getDeviceInfo();
-    const url = getApiUrl(`/api/messages/pending?deviceId=${encodeURIComponent(deviceId)}`);
-    const maxRetries = 3;
-    const retryDelayMs = 2000;
-
-    const doFetch = async (): Promise<{pending?: any[]; error?: string} | null> => {
-      try {
-        const res = await axios.get<{pending?: any[]; error?: string}>(url, {
-          timeout: 20000,
-          validateStatus: () => true,
-        });
-        return res?.data ?? null;
-      } catch (e: any) {
-        throw e;
-      }
-    };
-
-    const doNativeFetch = (): Promise<{pending?: any[]; error?: string}> =>
-      new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('timeout')), 20000);
-        fetch(url, { method: 'GET' })
-          .then(r => r.json().catch(() => ({})))
-          .then(d => { clearTimeout(t); resolve(d); })
-          .catch(e => { clearTimeout(t); reject(e); });
-      });
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        let data: {pending?: any[]; error?: string} | null = null;
+    try {
+      const {deviceService} = await import('./DeviceService');
+      const deviceInfo = await deviceService.getDeviceInfo();
+      const deviceId = deviceInfo.deviceId;
+      
+      // Backend endpoint: /api/messages/pending?deviceId=...
+      const url = getApiUrl(`/api/messages/pending?deviceId=${encodeURIComponent(deviceId)}`);
+      
+      const doFetch = async (): Promise<{pending?: any[]; error?: string} | null> => {
         try {
-          data = await doFetch();
-        } catch (axErr: any) {
-          if (attempt === 1) {
-            try { data = await doNativeFetch(); } catch (_) {}
-          }
-          if (!data) throw axErr;
+          const res = await axios.get<{pending?: any[]; error?: string}>(url, {
+            timeout: 10000, // Reduced timeout
+            validateStatus: () => true,
+          });
+          return res?.data ?? null;
+        } catch (e: any) {
+          throw e;
         }
-        const list = data?.pending;
-        if (!Array.isArray(list) || list.length === 0) {
-          if (data?.error) console.warn('📥 fetchPending: API error:', data.error);
+      };
+
+      const doNativeFetch = (): Promise<{pending?: any[]; error?: string}> =>
+        new Promise((resolve, reject) => {
+          const t = setTimeout(() => reject(new Error('timeout')), 10000);
+          fetch(url, { 
+            method: 'GET',
+            headers: {
+              'Accept': 'application/json',
+            },
+          })
+            .then(r => {
+              if (!r.ok) {
+                throw new Error(`HTTP ${r.status}`);
+              }
+              return r.json().catch(() => ({pending: []}));
+            })
+            .then(d => { clearTimeout(t); resolve(d); })
+            .catch(e => { clearTimeout(t); reject(e); });
+        });
+
+      // Try axios first, fallback to native fetch
+      let data: {pending?: any[]; error?: string} | null = null;
+      try {
+        data = await doFetch();
+      } catch (axErr: any) {
+        try { 
+          data = await doNativeFetch(); 
+        } catch (nativeErr: any) {
+          // Both failed - server is likely unreachable
+          // Don't log error every time to avoid spam
+          const now = Date.now();
+          if (now - this.lastFetchPendingErrorLog > 300000) { // 5 minutes
+            this.lastFetchPendingErrorLog = now;
+            // Silently handle - server connection will be retried
+          }
           return;
         }
-        console.log(`📥 fetchPending: got ${list.length} message(s) for device ${deviceId.slice(0, 8)}...`);
-        for (const m of list) {
+      }
+      
+      const list = data?.pending;
+      if (!Array.isArray(list) || list.length === 0) {
+        // No pending messages - this is normal
+        return;
+      }
+      
+      console.log(`📥 fetchPending: got ${list.length} message(s) for device ${deviceId.slice(0, 8)}...`);
+      
+      // Process all messages
+      for (const m of list) {
+        try {
           await this.processIncomingMessage(m);
+        } catch (err) {
+          console.error('Error processing pending message:', err);
         }
-        console.log(`📥 fetchPending: processed ${list.length} message(s), chat list should update`);
-        return;
-      } catch (e: any) {
-        const isNetwork = /network|timeout|econnaborted|enotfound|econnrefused/i.test(String(e?.message || e));
-        if (attempt < maxRetries && isNetwork) {
-          await new Promise(r => setTimeout(r, retryDelayMs));
-          continue;
-        }
-        console.warn('📥 fetchPending error (best-effort, chat works via socket without this):', e?.message || e);
-        return;
+      }
+      
+      console.log(`✅ fetchPending: processed ${list.length} message(s), chat list should update`);
+    } catch (e: any) {
+      // Silently handle any unexpected errors - don't spam logs
+      const now = Date.now();
+      if (now - this.lastFetchPendingErrorLog > 300000) { // 5 minutes
+        this.lastFetchPendingErrorLog = now;
+        console.warn('📥 fetchPending unexpected error:', e?.message || e);
       }
     }
   }
@@ -466,13 +569,15 @@ class ChatService {
     // Save locally immediately
     await messageStorageService.saveMessage(message);
 
-    // Try to connect if not connected
+    // Try to connect if not connected (connect retries up to 4x for Render cold start)
     if (!this.socket?.connected || !this.isAuthenticated) {
       try {
         await this.connect();
-      } catch (error) {
-        console.warn('⚠️ Could not connect, message saved locally:', error);
-        // Update status to pending but keep message
+        // One more try if still not connected
+        if (!this.socket?.connected || !this.isAuthenticated) {
+          await this.connect();
+        }
+      } catch {
         message.status = 'pending';
         await messageStorageService.saveMessage(message);
         return message;
@@ -576,6 +681,8 @@ class ChatService {
               }
             }
             await chatStorageService.updateChatWithMessage(serverMessage.chatId || chatId, serverMessage, false);
+            // Notify chat list to refresh so new chat appears
+            this.notifyChatListRefresh();
             this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
             resolve(serverMessage);
           } else {
@@ -586,6 +693,8 @@ class ChatService {
             try {
               const {chatStorageService} = await import('./ChatStorageService');
               await chatStorageService.updateChatWithMessage(chatId, message, false);
+              // Notify chat list to refresh so new chat appears
+              this.notifyChatListRefresh();
             } catch (e) {}
             this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
             resolve(message);
@@ -597,7 +706,10 @@ class ChatService {
         message.status = 'pending';
         messageStorageService.saveMessage(message).catch(console.error);
         import('./ChatStorageService').then(({chatStorageService}) =>
-          chatStorageService.updateChatWithMessage(chatId, message, false)
+          chatStorageService.updateChatWithMessage(chatId, message, false).then(() => {
+            // Notify chat list to refresh so new chat appears
+            this.notifyChatListRefresh();
+          })
         ).catch(() => {});
         this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
         resolve(message);

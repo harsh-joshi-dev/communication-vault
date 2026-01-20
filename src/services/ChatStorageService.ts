@@ -269,6 +269,7 @@ class ChatStorageService {
 
   /**
    * Normalize chatId (handle both with/without 'chat_' prefix)
+   * Always adds 'chat_' prefix for consistency in storage
    */
   private normalizeChatId(chatId: string): string {
     if (!chatId) return chatId;
@@ -278,6 +279,7 @@ class ChatStorageService {
 
   /**
    * Get base chatId (without prefix) for comparison
+   * Use this for comparing chatIds regardless of prefix
    */
   private getBaseChatId(chatId: string): string {
     if (!chatId) return chatId;

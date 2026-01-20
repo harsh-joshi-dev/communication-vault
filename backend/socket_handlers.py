@@ -387,7 +387,8 @@ def register_socket_handlers(socketio_instance):
 
             # ALWAYS save to PendingMessage when we have a receiver device id (backup for fetchPending)
             # Handles: receiver on different Render instance, receiver not connected, or socket emit missed
-            pend_device = receiver_device_id_from_data or (receiver_id if receiver_id and len(str(receiver_id)) > 10 else None)
+            # Priority: use receiver_actual_device_id if found (from uniqueCode lookup), otherwise use receiver_device_id_from_data or receiver_id
+            pend_device = receiver_actual_device_id or receiver_device_id_from_data or (receiver_id if receiver_id and len(str(receiver_id)) > 10 else None)
             if pend_device:
                 try:
                     PendingMessage(
@@ -398,6 +399,26 @@ def register_socket_handlers(socketio_instance):
                     print(f"📥 Saved to MongoDB pending_messages for device {pend_device} (backup for fetchPending)")
                 except Exception as e:
                     print(f"⚠️ Failed to save pending to MongoDB: {e}")
+            
+            # Also save with uniqueCode as receiver if we have uniqueCode but no deviceId (for devices that haven't connected yet)
+            if receiver_unique_code and not receiver_actual_device_id:
+                # Try to find deviceId from uniqueCode in database
+                try:
+                    from models_mongo import User
+                    user_with_code = User.objects(unique_code=receiver_unique_code).first()
+                    if user_with_code and user_with_code.device_id and user_with_code.device_id != pend_device:
+                        try:
+                            PendingMessage(
+                                receiver_device_id=user_with_code.device_id,
+                                message_dict=message_dict,
+                                created_at=datetime.utcnow()
+                            ).save()
+                            print(f"📥 Saved to MongoDB pending_messages for device {user_with_code.device_id} (from uniqueCode)")
+                        except Exception as e2:
+                            print(f"⚠️ Failed to save pending with deviceId from code: {e2}")
+                except Exception as e:
+                    # MongoDB not available or User not found - skip
+                    pass
 
             # CRITICAL: DELIVER MESSAGE FIRST (works without MongoDB)
             print(f"🚀 DELIVERING MESSAGE IMMEDIATELY (MongoDB-independent):")

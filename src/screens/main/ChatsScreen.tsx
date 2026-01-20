@@ -29,20 +29,52 @@ const ChatsScreen: React.FC = () => {
   useEffect(() => {
     const unM = chatService.onMessage(() => { loadChats(true); });
     const unC = chatService.onChatUpdate((chat: Chat) => {
+      // Normalize chatId for comparison (remove 'chat_' prefix)
+      const normalizeId = (id: string) => (id || '').replace(/^chat_/, '');
+      
       if (chat && (chat as any).id) {
         setChats(prev => {
-          const n = (id: string) => (id || '').replace(/^chat_/, '');
-          const nid = n((chat as any).id);
-          const i = prev.findIndex(c => n(c.id) === nid);
-          const ch = { ...chat, lastMessage: chat.lastMessage || (chat as any).lastMessage, updatedAt: (chat as any).updatedAt || new Date().toISOString() };
-          if (i >= 0) {
-            const next = [...prev];
-            next[i] = { ...next[i], ...ch, lastMessage: ch.lastMessage || next[i].lastMessage };
-            return next.sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
+          const chatId = (chat as any).id;
+          const normalizedChatId = normalizeId(chatId);
+          
+          // Find existing chat by normalized ID
+          const existingIndex = prev.findIndex(c => {
+            const cNormalized = normalizeId(c.id);
+            return c.id === chatId || cNormalized === normalizedChatId || c.id === normalizedChatId;
+          });
+          
+          const updatedChat = {
+            ...chat,
+            id: chatId,
+            lastMessage: chat.lastMessage || (chat as any).lastMessage,
+            updatedAt: (chat as any).updatedAt || chat.updatedAt || new Date().toISOString(),
+          };
+          
+          let updatedChats: Chat[];
+          if (existingIndex >= 0) {
+            // Update existing chat
+            updatedChats = [...prev];
+            updatedChats[existingIndex] = {
+              ...updatedChats[existingIndex],
+              ...updatedChat,
+              lastMessage: updatedChat.lastMessage || updatedChats[existingIndex].lastMessage,
+              updatedAt: updatedChat.updatedAt,
+            };
+          } else {
+            // Add new chat
+            updatedChats = [updatedChat, ...prev];
           }
-          return [ch, ...prev].sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
+          
+          // Sort by updatedAt (most recent first) - WhatsApp style
+          return updatedChats.sort((a, b) => {
+            const dateA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+            const dateB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+            return dateB - dateA; // Descending: most recent first
+          });
         });
       }
+      
+      // Also reload chats to ensure consistency
       loadChats(true);
     });
     const unD = chatService.onChatDeletedForEveryone((id) => {
@@ -187,11 +219,19 @@ const ChatsScreen: React.FC = () => {
         }
       }, 1000);
       
-      // Periodic refresh: loadChats every 5s; fetchPending every 5s (aggressive when list empty / cross-instance)
+      // Periodic refresh: loadChats every 5s; fetchPending every 5s (less aggressive to reduce load)
       const refreshInterval = setInterval(() => loadChats(true), 5000);
       const pendingInterval = setInterval(() => {
-        chatService.fetchPendingMessages().catch(() => {});
-      }, 5000);
+        // Always fetch pending messages - critical when socket is disconnected
+        // Errors are silently handled inside fetchPendingMessages
+        chatService.fetchPendingMessages().then(() => {
+          // Reload chats after fetching pending messages to show new chats
+          loadChats(true);
+        }).catch(() => {
+          // Errors are handled internally, just reload chats anyway
+          loadChats(true);
+        });
+      }, 5000); // Check every 5 seconds for pending messages (balanced frequency)
 
       return () => {
         if (typingUnsubscribe) typingUnsubscribe();
@@ -207,11 +247,34 @@ const ChatsScreen: React.FC = () => {
     try {
       if (!silent) setLoading(true);
       const loadedChats = await chatStorageService.getChats();
-      setChats(prev => loadedChats.length > 0 ? loadedChats : prev);
-      if (loadedChats.length === 0) {
+      
+      // Ensure chats are sorted by updatedAt (most recent first) - WhatsApp style
+      const sortedChats = loadedChats.sort((a, b) => {
+        const dateA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+        const dateB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+        return dateB - dateA; // Descending: most recent first
+      });
+      
+      if (sortedChats.length > 0) {
+        setChats(sortedChats);
+        console.log(`✅ Loaded ${sortedChats.length} chat(s)`);
+      } else {
+        // Keep previous chats if no new chats found (to avoid flickering)
+        setChats(prev => prev.length > 0 ? prev : []);
+        
+        // Retry loading after delays if list is empty (handles timing issues)
         [400, 800, 1400, 2000].forEach((ms) => {
           setTimeout(() => {
-            chatStorageService.getChats().then((c) => { if (c.length > 0) setChats(c); });
+            chatStorageService.getChats().then((c) => {
+              if (c.length > 0) {
+                const sorted = c.sort((a, b) => {
+                  const dateA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+                  const dateB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+                  return dateB - dateA;
+                });
+                setChats(sorted);
+              }
+            });
           }, ms);
         });
       }

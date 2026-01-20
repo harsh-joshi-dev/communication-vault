@@ -61,15 +61,36 @@ const ChatDetailScreen: React.FC = () => {
   // Reload messages and chat name when screen comes into focus (like WhatsApp)
   useFocusEffect(
     React.useCallback(() => {
+      chatService.connect().catch(() => {});
       loadMessages();
       loadChatName();
       chatStorageService.markChatAsRead(chatId);
-      // Fetch pending (catches cross-instance / missed socket) so messages appear on emulator
-      chatService.fetchPendingMessages().catch(() => {});
+      chatService.joinChat(chatId);
+      
+      // Fetch pending messages immediately when screen focuses
+      chatService.fetchPendingMessages().then(() => {
+        loadMessages(); // Reload messages after fetching pending
+      }).catch(() => {});
+      
+      // Poll for pending messages every 5 seconds (critical when socket is disconnected)
       const pendingInterval = setInterval(() => {
-        chatService.fetchPendingMessages().catch(() => {});
-      }, 10000);
-      return () => { clearInterval(pendingInterval); };
+        chatService.fetchPendingMessages().then(() => {
+          loadMessages(); // Reload messages after fetching pending
+        }).catch(() => {
+          // Errors are handled internally, reload messages anyway to catch any local updates
+          loadMessages();
+        });
+      }, 5000);
+      
+      // Also reload messages periodically to catch any missed messages
+      const reloadInterval = setInterval(() => {
+        loadMessages();
+      }, 5000);
+      
+      return () => { 
+        clearInterval(pendingInterval);
+        clearInterval(reloadInterval);
+      };
     }, [chatId])
   );
 
@@ -105,15 +126,43 @@ const ChatDetailScreen: React.FC = () => {
       setupStatusUpdateListener();
       joinChat();
       loadMessages();
+      // Fetch pending messages after connecting
+      chatService.fetchPendingMessages().then(() => {
+        loadMessages();
+      }).catch(() => {});
     }).catch(() => {
+      // Even if connection fails, fetch pending messages (important for offline receiving)
+      chatService.fetchPendingMessages().then(() => {
+        loadMessages();
+      }).catch(() => {});
+      
+      // Retry connection after delay
       setTimeout(() => {
         chatService.connect().then(() => {
           setupTypingListener();
           setupStatusUpdateListener();
           joinChat();
           loadMessages();
+          chatService.fetchPendingMessages().then(() => {
+            loadMessages();
+          }).catch(() => {});
         }).catch(() => {});
       }, 3000);
+      
+      // Poll for pending messages every 5 seconds when socket is disconnected
+      const pollInterval = setInterval(() => {
+        chatService.fetchPendingMessages().then(() => {
+          loadMessages();
+        }).catch(() => {
+          // Errors are handled internally, reload messages anyway
+          loadMessages();
+        });
+      }, 5000);
+      
+      // Clear interval on cleanup
+      return () => {
+        clearInterval(pollInterval);
+      };
     });
 
     chatStorageService.markChatAsRead(chatId);
@@ -475,66 +524,60 @@ const ChatDetailScreen: React.FC = () => {
       // Get current device ID to determine which messages are "mine"
       const currentDevice = await deviceService.getDeviceInfo();
       const myDeviceId = currentDevice.deviceId;
+      const myUniqueCode = currentDevice.uniqueCode;
       
-      // Try loading with multiple chatId formats to ensure we get all messages
-      const chatIdVariants = [
-        chatId,
-        normalizedChatId,
-        normalizedChatId.replace(/^chat_/, ''),
-        `chat_${normalizedChatId}`,
-      ];
+      // Load messages using the chat service (it handles multiple formats internally)
+      const allMsgs = await chatService.getMessages(chatId);
+      console.log(`✅ Loaded ${allMsgs.length} message(s) from storage`);
       
-      // Remove duplicates
-      const uniqueVariants = Array.from(new Set(chatIdVariants.filter(Boolean)));
+      // Filter out deleted messages
+      const visibleMessages = allMsgs.filter(msg => !msg.isDeleted);
       
-      console.log(`📥 Trying to load messages with chatId variants:`, uniqueVariants);
-      
-      // Load from all variants
-      const allMessagesArrays = await Promise.all(
-        uniqueVariants.map(id => chatService.getMessages(id))
-      );
-      
-      // Flatten and combine all messages
-      const allMsgs = allMessagesArrays.flat();
-      console.log(`✅ Loaded ${allMsgs.length} total message(s) from storage (across ${uniqueVariants.length} variants)`);
-      
-      // Deduplicate by id (use id or _id so same message from different keys collapses to one)
-      const uniqueMessages = Array.from(
-        new Map(allMsgs.map(msg => [msg.id || (msg as any)._id, msg])).values()
-      );
-      
-      // Filter messages that match this chat (normalize their chatIds too)
-      // Also include messages where sender or receiver matches (for device-based chats)
-      const matchingMessages = uniqueMessages.filter(msg => {
+      // Filter messages that match this chat - be more precise
+      const matchingMessages = visibleMessages.filter(msg => {
         const msgChatId = normalizeChatId(msg.chatId || '');
-        const msgMatchesChatId = msgChatId === normalizedChatId || 
-                                 msg.chatId === chatId || 
-                                 msg.chatId === normalizedChatId ||
-                                 msgChatId === chatId ||
-                                 msg.chatId === `chat_${normalizedChatId}` ||
-                                 msgChatId === `chat_${normalizedChatId}`;
+        const msgMatchesChatId = msgChatId === normalizedChatId;
         
-        // Also match if sender or receiver is part of this chat
-        const msgMatchesParticipants = (msg.senderId === myDeviceId || 
-                                        msg.receiverId === myDeviceId ||
-                                        msg.senderId === receiverId ||
-                                        msg.receiverId === receiverId);
+        // Also match by participants if chatId doesn't match but participants do
+        // (handles cases where chatId might differ but it's the same conversation)
+        if (!msgMatchesChatId) {
+          const isFromMe = msg.senderId === myDeviceId || msg.senderId === myUniqueCode;
+          const isToMe = msg.receiverId === myDeviceId || msg.receiverId === myUniqueCode;
+          const isFromReceiver = msg.senderId === receiverId || msg.senderId === receiverUniqueCode;
+          const isToReceiver = msg.receiverId === receiverId || msg.receiverId === receiverUniqueCode;
+          
+          // Match if message involves me and the receiver we're chatting with
+          return (isFromMe && isToReceiver) || (isFromReceiver && isToMe);
+        }
         
-        return msgMatchesChatId || msgMatchesParticipants;
+        return true;
       });
       
-      // Sort by timestamp
-      const sortedMessages = matchingMessages.sort((a, b) => {
+      // Deduplicate by message ID
+      const uniqueMap = new Map<string, Message>();
+      matchingMessages.forEach(msg => {
+        const msgId = msg.id || (msg as any)._id || '';
+        if (msgId && !uniqueMap.has(msgId)) {
+          uniqueMap.set(msgId, msg);
+        }
+      });
+      
+      // Sort by timestamp (ascending - oldest first, newest at bottom) - WhatsApp style
+      const sortedMessages = Array.from(uniqueMap.values()).sort((a, b) => {
         const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
         const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
+        // If timestamps are equal, use a fallback to maintain order
+        if (dateA === dateB) {
+          return (a.id || '').localeCompare(b.id || '');
+        }
         return dateA - dateB;
       });
       
       console.log(`✅ Filtered and deduplicated: ${allMsgs.length} → ${sortedMessages.length} unique messages for this chat`);
-      console.log(`📋 Message details:`);
-      sortedMessages.forEach((msg, idx) => {
-        console.log(`   ${idx + 1}. ${msg.id} - ${msg.senderId === myDeviceId ? 'ME' : 'THEM'}: ${msg.content?.substring(0, 30) || msg.type}`);
-      });
+      if (sortedMessages.length > 0) {
+        console.log(`📋 First message: ${sortedMessages[0].content?.substring(0, 30) || sortedMessages[0].type} (${new Date(sortedMessages[0].createdAt || sortedMessages[0].sentAt || 0).toLocaleTimeString()})`);
+        console.log(`📋 Last message: ${sortedMessages[sortedMessages.length - 1].content?.substring(0, 30) || sortedMessages[sortedMessages.length - 1].type} (${new Date(sortedMessages[sortedMessages.length - 1].createdAt || sortedMessages[sortedMessages.length - 1].sentAt || 0).toLocaleTimeString()})`);
+      }
       
       // Set messages - WhatsApp style: oldest at top, newest at bottom
       setMessages(sortedMessages);
@@ -542,10 +585,10 @@ const ChatDetailScreen: React.FC = () => {
       // Scroll to bottom (newest messages) after messages are set
       setTimeout(() => {
         scrollToBottom(false); // No animation on initial load for speed
-      }, 50);
+      }, 100);
       setTimeout(() => {
         scrollToBottom(true); // Animated scroll as backup
-      }, 200);
+      }, 300);
     } catch (error) {
       console.error('❌ Error loading messages:', error);
       setMessages([]);
@@ -562,87 +605,123 @@ const ChatDetailScreen: React.FC = () => {
         content: message.content?.substring(0, 30),
       });
       
-      // Normalize chatIds for comparison
+      // Normalize chatIds for comparison - remove 'chat_' prefix for consistent comparison
       const normalizedCurrentChatId = normalizeChatId(chatId);
       const normalizedMessageChatId = normalizeChatId(message.chatId || '');
       
       // Check if message is for this chat
       const deviceInfo = await deviceService.getDeviceInfo();
-      const isFromReceiver = message.senderId === receiverId || message.senderId === receiverUniqueCode;
-      const isToMe = message.receiverId === deviceInfo.deviceId || message.receiverId === deviceInfo.uniqueCode || !message.receiverId;
+      const myDeviceId = deviceInfo.deviceId;
+      const myUniqueCode = deviceInfo.uniqueCode;
       
-      // Match chatId (with or without prefix)
-      const matchesChat = normalizedMessageChatId === normalizedCurrentChatId || 
-                         message.chatId === chatId ||
-                         (message.chatId && chatId && (
-                           message.chatId.replace(/^chat_/, '') === chatId.replace(/^chat_/, '')
-                         ));
+      // Match by chatId (normalized comparison)
+      const matchesChatId = normalizedMessageChatId === normalizedCurrentChatId;
       
-      // Show message if:
-      // 1. ChatId matches (normalized), OR
-      // 2. Message is from/to the receiver we're chatting with
-      const shouldShow = matchesChat || (isFromReceiver && isToMe);
+      // Match by participants (for device-based chats)
+      const isFromReceiver = message.senderId === receiverId || 
+                            message.senderId === receiverUniqueCode ||
+                            (receiverId && message.senderId && message.senderId === receiverId) ||
+                            (receiverUniqueCode && message.senderId && message.senderId === receiverUniqueCode);
+      
+      const isToMe = message.receiverId === myDeviceId || 
+                     message.receiverId === myUniqueCode ||
+                     (!message.receiverId && message.senderId !== myDeviceId);
+      
+      const isFromMe = message.senderId === myDeviceId || message.senderId === myUniqueCode;
+      
+      // Show message if chatId matches OR (message is from receiver AND is to me) OR (message is from me AND is to receiver)
+      const shouldShow = matchesChatId || 
+                        (isFromReceiver && isToMe && !isFromMe) ||
+                        (isFromMe && (message.receiverId === receiverId || message.receiverId === receiverUniqueCode));
       
       if (!shouldShow) {
         console.log('⚠️ Message not for this chat, ignoring', {
           messageChatId: normalizedMessageChatId,
           currentChatId: normalizedCurrentChatId,
-          matches: matchesChat,
+          matchesChatId,
           isFromReceiver,
-          isToMe
+          isToMe,
+          isFromMe
         });
         return;
       }
       
-      console.log('✅ Message is for this chat, displaying it!!!!!', message);
+      console.log('✅ Message is for this chat, displaying it!', message);
       
-      // Normalize message chatId to match current chatId format
-      if (message.chatId && normalizedMessageChatId === normalizedCurrentChatId) {
-        // Update message chatId to match current format for consistency
-        message.chatId = chatId; // Use current chatId format
-      }
+      // Normalize message chatId to match current chatId format for consistency
+      const messageChatId = message.chatId ? chatId : chatId;
+      const normalizedMessage = { ...message, chatId: messageChatId };
       
-      if (message.isDeleted) {
-        setMessages(prev => prev.filter(msg => msg.id !== message.id));
-        return;
-      }
-      
-      const mid = message.id || (message as any)._id || `r-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      const created = message.createdAt || message.sentAt || new Date().toISOString();
-      const sent = message.sentAt || message.createdAt || new Date().toISOString();
-      setMessages(prev => {
-        const normalizedMessage = { ...message, id: mid, chatId, createdAt: created, sentAt: sent };
-        const existingIndex = prev.findIndex(msg => (msg.id || (msg as any)._id) === mid);
-        
-        if (existingIndex !== -1) {
-          const updated = [...prev];
-          updated[existingIndex] = normalizedMessage;
-          const uniqueMap = new Map<string, Message>();
-          updated.forEach((msg, i) => {
-            const k = msg.id || (msg as any)._id || `x-${i}`;
-            if (!uniqueMap.has(k)) uniqueMap.set(k, msg);
+      if (normalizedMessage.isDeleted) {
+        setMessages(prev => {
+          const filtered = prev.filter(msg => msg.id !== normalizedMessage.id && (msg as any)._id !== normalizedMessage.id);
+          // Ensure sorted order after filtering
+          return filtered.sort((a, b) => {
+            const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
+            const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
+            return dateA - dateB;
           });
-          return Array.from(uniqueMap.values()).sort((a, b) =>
-            new Date(a.createdAt || a.sentAt || 0).getTime() - new Date(b.createdAt || b.sentAt || 0).getTime()
-          );
-        }
-
-        const updated = [...prev, normalizedMessage];
-        const uniqueMap = new Map<string, Message>();
-        updated.forEach((msg, i) => {
-          const k = msg.id || (msg as any)._id || `x-${i}`;
-          if (!uniqueMap.has(k)) uniqueMap.set(k, msg);
         });
-        return Array.from(uniqueMap.values()).sort((a, b) =>
-          new Date(a.createdAt || a.sentAt || 0).getTime() - new Date(b.createdAt || b.sentAt || 0).getTime()
-        );
+        return;
+      }
+      
+      const mid = normalizedMessage.id || (normalizedMessage as any)._id || `r-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const created = normalizedMessage.createdAt || normalizedMessage.sentAt || new Date().toISOString();
+      const sent = normalizedMessage.sentAt || normalizedMessage.createdAt || new Date().toISOString();
+      
+      // Update messages state with proper sorting
+      setMessages(prev => {
+        // Remove duplicates based on message ID
+        const existingIndex = prev.findIndex(msg => {
+          const msgId = msg.id || (msg as any)._id;
+          return msgId === mid || msgId === normalizedMessage.id || msgId === (normalizedMessage as any)._id;
+        });
+        
+        let updated: Message[];
+        if (existingIndex !== -1) {
+          // Update existing message
+          updated = [...prev];
+          updated[existingIndex] = { ...normalizedMessage, id: mid, chatId: messageChatId, createdAt: created, sentAt: sent };
+        } else {
+          // Add new message
+          updated = [...prev, { ...normalizedMessage, id: mid, chatId: messageChatId, createdAt: created, sentAt: sent }];
+        }
+        
+        // Remove any duplicates and sort by timestamp (ascending - oldest first, newest last)
+        const uniqueMap = new Map<string, Message>();
+        updated.forEach((msg) => {
+          const msgId = msg.id || (msg as any)._id || '';
+          if (msgId && !uniqueMap.has(msgId)) {
+            uniqueMap.set(msgId, msg);
+          }
+        });
+        
+        const sorted = Array.from(uniqueMap.values()).sort((a, b) => {
+          const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
+          const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
+          // Ascending order: oldest first, newest at bottom (WhatsApp style)
+          return dateA - dateB;
+        });
+        
+        return sorted;
       });
       
-      setTimeout(() => scrollToBottom(true), 150);
-      setTimeout(() => scrollToBottom(true), 400);
-      const messageChatId = message.chatId || chatId;
-      chatStorageService.updateChatWithMessage(messageChatId, { ...message, id: mid, chatId: messageChatId, createdAt: created, sentAt: sent }, false).catch(() => {});
-      chatService.markAsRead(messageChatId, [mid]).catch(() => {});
+      // Scroll to bottom after message is added
+      setTimeout(() => scrollToBottom(true), 100);
+      setTimeout(() => scrollToBottom(true), 300);
+      
+      // Update chat storage and mark as read
+      const finalMessage: Message = { ...normalizedMessage, id: mid, chatId: messageChatId, createdAt: created, sentAt: sent };
+      chatStorageService.updateChatWithMessage(messageChatId, finalMessage, !isFromMe).catch((err) => {
+        console.error('Error updating chat with message:', err);
+      });
+      
+      // Mark as read if message is from other user
+      if (!isFromMe) {
+        setTimeout(() => {
+          chatService.markAsRead(messageChatId, [mid]).catch(() => {});
+        }, 500);
+      }
     });
     
     // Store unsubscribe function for cleanup
@@ -719,33 +798,67 @@ const ChatDetailScreen: React.FC = () => {
         receiverUniqueCode: receiverUniqueCode,
       },
     ).then((sentMessage) => {
+      console.log('✅ Message sent successfully:', sentMessage.id);
+      
       // Replace temp message with real message (or add if not found)
       setMessages(prev => {
-        const exists = prev.find(msg => msg.id === tempMessageId);
+        const exists = prev.find(msg => msg.id === tempMessageId || msg.id === sentMessage.id || (msg as any)._id === sentMessage.id);
         if (exists) {
-          return prev.map(msg => 
-            msg.id === tempMessageId ? {...sentMessage, status: sentMessage.status || 'sent'} : msg
-          );
+          // Update existing message
+          const updated = prev.map(msg => {
+            if (msg.id === tempMessageId || msg.id === sentMessage.id || (msg as any)._id === sentMessage.id) {
+              return {...sentMessage, status: sentMessage.status || 'sent', chatId};
+            }
+            return msg;
+          });
+          
+          // Remove duplicates and sort
+          const uniqueMap = new Map<string, Message>();
+          updated.forEach(msg => {
+            const msgId = msg.id || (msg as any)._id || '';
+            if (msgId && !uniqueMap.has(msgId)) {
+              uniqueMap.set(msgId, msg);
+            }
+          });
+          
+          return Array.from(uniqueMap.values()).sort((a, b) => {
+            const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
+            const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
+            return dateA - dateB;
+          });
         }
+        
         // If temp message not found, add the sent message
-        return [...prev, {...sentMessage, status: sentMessage.status || 'sent'}].sort((a, b) => 
-          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-        );
+        const updated = [...prev, {...sentMessage, status: sentMessage.status || 'sent', chatId}];
+        
+        // Remove duplicates and sort
+        const uniqueMap = new Map<string, Message>();
+        updated.forEach(msg => {
+          const msgId = msg.id || (msg as any)._id || '';
+          if (msgId && !uniqueMap.has(msgId)) {
+            uniqueMap.set(msgId, msg);
+          }
+        });
+        
+        return Array.from(uniqueMap.values()).sort((a, b) => {
+          const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
+          const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
+          return dateA - dateB;
+        });
       });
       
-      // Update chat storage with new message (for ChatsScreen)
-      chatStorageService.updateChatWithMessage(chatId, sentMessage).catch(err => 
-        console.error('Error updating chat:', err)
-      );
+      // Update chat storage with new message (for ChatsScreen) - this ensures chat appears in list
+      chatStorageService.updateChatWithMessage(chatId, {...sentMessage, chatId}, false).then(() => {
+        console.log('✅ Chat updated in storage, should appear in chat list');
+        // Notify chat list to refresh
+        chatService.notifyChatListRefresh();
+      }).catch(err => {
+        console.error('Error updating chat:', err);
+      });
       
       scrollToBottom();
       
-      // Mark messages as read if receiver is viewing
-      if (receiverId) {
-        setTimeout(() => {
-          chatService.markAsRead(chatId, [sentMessage.id]);
-        }, 1000);
-      }
+      // Mark messages as read if receiver is viewing (optional - don't auto-mark sent messages as read)
     }).catch((error: any) => {
       // Even if there's an error, keep the message (optimistic)
       console.warn('Message send warning (message kept locally):', error?.message);
@@ -753,6 +866,9 @@ const ChatDetailScreen: React.FC = () => {
       setMessages(prev => prev.map(msg => 
         msg.id === tempMessageId ? {...msg, status: 'pending'} : msg
       ));
+      
+      // Still try to update chat storage even on error (for chat list)
+      chatStorageService.updateChatWithMessage(chatId, {...tempMessage, status: 'pending'}, false).catch(() => {});
     });
   };
 
@@ -783,7 +899,9 @@ const ChatDetailScreen: React.FC = () => {
                 receiverUniqueCode: receiverUniqueCode,
               },
             ).then((sentMessage) => {
-              chatStorageService.updateChatWithMessage(chatId, sentMessage).catch(err => 
+              chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
+                chatService.notifyChatListRefresh();
+              }).catch(err => 
                 console.error('Error updating chat:', err)
               );
               scrollToBottom();
@@ -826,7 +944,9 @@ const ChatDetailScreen: React.FC = () => {
                 receiverUniqueCode: receiverUniqueCode,
               },
             ).then((sentMessage) => {
-              chatStorageService.updateChatWithMessage(chatId, sentMessage).catch(err => 
+              chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
+                chatService.notifyChatListRefresh();
+              }).catch(err => 
                 console.error('Error updating chat:', err)
               );
               scrollToBottom();
@@ -866,7 +986,9 @@ const ChatDetailScreen: React.FC = () => {
             receiverUniqueCode: receiverUniqueCode,
           },
         ).then((sentMessage) => {
-          chatStorageService.updateChatWithMessage(chatId, sentMessage).catch(err => 
+          chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
+            chatService.notifyChatListRefresh();
+          }).catch(err => 
             console.error('Error updating chat:', err)
           );
           scrollToBottom();
@@ -936,7 +1058,9 @@ const ChatDetailScreen: React.FC = () => {
             receiverUniqueCode: receiverUniqueCode,
           },
         ).then((sentMessage) => {
-          chatStorageService.updateChatWithMessage(chatId, sentMessage).catch(err => 
+          chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
+            chatService.notifyChatListRefresh();
+          }).catch(err => 
             console.error('Error updating chat:', err)
           );
         }).catch((error: any) => {
