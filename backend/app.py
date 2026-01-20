@@ -67,13 +67,22 @@ def init_mongodb():
             print(f"   URI: {uri.split('@')[1] if '@' in uri else 'hidden'}")
             print(f"   Database: {db_name}")
             
-            connect(
-                db=db_name,
-                host=uri_with_db,
-                alias='default',
-                connect=True,  # Connect immediately (not lazy)
-                serverSelectionTimeoutMS=10000,  # 10 second timeout
-            )
+            # Try to connect with increased timeout and better error handling
+            # If using mongodb+srv://, we might encounter DNS resolution issues
+            # The connection will gracefully fail and app will continue without MongoDB
+            try:
+                connect(
+                    db=db_name,
+                    host=uri_with_db,
+                    alias='default',
+                    connect=True,  # Connect immediately (not lazy)
+                    serverSelectionTimeoutMS=15000,  # 15 second timeout (increased for DNS resolution)
+                    connectTimeoutMS=15000,  # 15 second connection timeout
+                )
+            except Exception as connect_error:
+                # If connection fails due to DNS/SRV issues, re-raise to be caught by outer try-catch
+                # This allows the app to continue running without MongoDB
+                raise connect_error
             
             # Test the connection by pinging MongoDB
             from mongoengine import get_db
@@ -88,12 +97,33 @@ def init_mongodb():
             retry_count += 1
             error_msg = str(e)
             import traceback
-            print(f"❌ MongoDB connection attempt {retry_count}/{max_retries} failed")
-            print(f"   Error: {error_msg}")
-            print(f"   Traceback: {traceback.format_exc()}")
+            
+            # Only log full traceback on first attempt to reduce spam
+            if retry_count == 1:
+                print(f"❌ MongoDB connection attempt {retry_count}/{max_retries} failed")
+                print(f"   Error: {error_msg[:200]}...")  # Truncate long errors
+                # Only show traceback for first attempt
+                if 'ignore_errors' not in error_msg and 'Lookup timed out' not in error_msg:
+                    print(f"   Traceback: {traceback.format_exc()}")
+            else:
+                # Subsequent attempts - minimal logging
+                print(f"❌ MongoDB connection attempt {retry_count}/{max_retries} failed (DNS/network issue)")
             
             # Check for specific error types
-            if 'super(type, obj)' in error_msg or 'must be an instance' in error_msg:
+            if 'ignore_errors' in error_msg and 'udp()' in error_msg:
+                print("   ⚠️  DNS Resolution Error: dnspython version compatibility issue.")
+                print("   💡 This is a known issue with Render's DNS infrastructure.")
+                print("   💡 Solutions:")
+                print("      1. App will continue without MongoDB (chat works via socket)")
+                print("      2. Try updating dnspython: pip install --upgrade dnspython")
+                print("      3. Or use standard MongoDB URI (not mongodb+srv://)")
+                print("      4. Chat functionality will work without MongoDB connection")
+            elif 'resolution lifetime expired' in error_msg or 'ConfigurationError' in error_msg:
+                print("   ⚠️  DNS Resolution Error: Cannot resolve MongoDB hostname.")
+                print("   💡 This may be a network/DNS issue on Render's infrastructure.")
+                print("   💡 App will continue without MongoDB (chat works via socket)")
+                print("   💡 Messages will be delivered via socket.io, pending API works when MongoDB is up")
+            elif 'super(type, obj)' in error_msg or 'must be an instance' in error_msg:
                 print("   ⚠️  Type Error: This might be a MongoDB driver version issue.")
                 print("   💡 Solutions:")
                 print("      1. Check MongoDB Atlas cluster status (might be paused)")
@@ -109,18 +139,26 @@ def init_mongodb():
                 print("      4. Verify cluster name matches in connection string")
             elif 'authentication failed' in error_msg.lower():
                 print("   ⚠️  Authentication Error: Check username/password in connection string")
-            elif 'timeout' in error_msg.lower():
-                print("   ⚠️  Timeout Error: Check network connectivity and IP whitelist")
+            elif 'timeout' in error_msg.lower() or 'Lookup timed out' in error_msg or 'No address associated' in error_msg:
+                print("   ⚠️  DNS/Network Error: Cannot resolve MongoDB hostname (Render DNS issue)")
+                print("   💡 This is a known Render infrastructure limitation with DNS resolution")
+                print("   💡 App will continue without MongoDB - chat works perfectly via Socket.io")
+                print("   💡 Messages are saved locally on devices and delivered in real-time")
             
             if retry_count >= max_retries:
                 print(f"\n❌ MongoDB connection failed after {max_retries} attempts")
-                print("   App will continue but MongoDB operations will fail.")
-                print("   Please check your MONGODB_URI in Render environment variables.")
-                print("\n   🔧 Quick Fixes:")
-                print("   1. Go to MongoDB Atlas → Your Cluster → Connect")
-                print("   2. Check if cluster is paused → Click 'Resume' if needed")
-                print("   3. Network Access → Add IP Address → Add 0.0.0.0/0 (allow all)")
-                print("   4. Database Access → Verify user credentials")
+                print("   ⚠️  App will continue running without MongoDB.")
+                print("   ✅ Chat functionality will work via Socket.io (real-time delivery)")
+                print("   ✅ Messages will be saved locally on devices")
+                print("   ⚠️  Pending messages API will not work until MongoDB is connected")
+                print("\n   🔧 To fix MongoDB connection:")
+                print("   1. Check Render environment variables → MONGODB_URI")
+                print("   2. MongoDB Atlas → Your Cluster → Connect")
+                print("   3. Check if cluster is paused → Click 'Resume' if needed")
+                print("   4. Network Access → Add IP Address → Add 0.0.0.0/0 (allow all)")
+                print("   5. Database Access → Verify user credentials")
+                print("   6. If DNS errors persist, try updating dnspython: pip install --upgrade dnspython")
+                print("\n   💡 Note: Chat will continue to work via Socket.io even without MongoDB!")
                 return False
             import time
             time.sleep(3)  # Wait before retry

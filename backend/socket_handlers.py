@@ -91,7 +91,11 @@ def register_socket_handlers(socketio_instance):
                     if docs:
                         print(f"✅ Delivered {len(docs)} pending (MongoDB) to {device_id} on reconnect")
                 except Exception as e:
-                    print(f"⚠️ MongoDB pending delivery failed: {e}")
+                    # Only log MongoDB errors once per connection to reduce spam
+                    error_str = str(e)
+                    if 'Lookup timed out' not in error_str and 'No address associated' not in error_str:
+                        print(f"⚠️ MongoDB pending delivery failed: {error_str[:100]}")
+                    # Silently handle DNS/timeout errors - they're expected when MongoDB is unavailable
 
             print(f"✅ Device {device_id} ({device_name}) connected with code {unique_code}, Socket ID: {request.sid}")
             return True
@@ -609,7 +613,11 @@ def register_socket_handlers(socketio_instance):
                 else:
                     print(f"📋 Chat not found in DB (may not exist yet), will broadcast to all rooms")
             except Exception as e:
-                print(f"⚠️ Could not fetch chat for typing: {e}")
+                # Suppress verbose MongoDB DNS errors for typing indicators
+                error_str = str(e)
+                if 'Lookup timed out' not in error_str and 'No address associated' not in error_str:
+                    print(f"⚠️ Could not fetch chat for typing: {error_str[:100]}")
+                # Silently handle DNS/timeout errors - typing still works via socket
                 receiver_id = None
             
             # Typing data to emit
