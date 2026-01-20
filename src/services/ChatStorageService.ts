@@ -5,29 +5,40 @@ import {Chat, Message} from '../types';
  * Service to manage chats locally (like WhatsApp)
  * Stores chats in local storage, not in contacts
  */
+const CHATS_STORAGE_KEY = 'device_chats';
+
 class ChatStorageService {
-  private static CHATS_KEY = 'device_chats';
   private static MESSAGES_KEY_PREFIX = 'chat_messages_';
 
   /**
-   * Get all chats
+   * Get all chats. Retries once if empty (guards against flaky reads/races).
    */
   async getChats(): Promise<Chat[]> {
-    try {
-      const chatsJson = await EncryptedStorage.getItem(ChatStorageService.CHATS_KEY);
-      if (!chatsJson) {
-        console.log('📭 No chats found in storage (empty JSON)');
+    const doGet = async (): Promise<Chat[]> => {
+      const chatsJson = await EncryptedStorage.getItem(CHATS_STORAGE_KEY);
+      if (!chatsJson || chatsJson === '') {
         return [];
       }
       const chats = JSON.parse(chatsJson);
-      
       if (!Array.isArray(chats)) {
         console.error('❌ Chats data is not an array:', typeof chats);
         return [];
       }
-      
-      console.log(`📥 Loaded ${chats.length} chat(s) from storage`);
-      
+      return chats;
+    };
+
+    try {
+      let chats = await doGet();
+      if (chats.length === 0) {
+        // Retry once after a short delay (guards against race with concurrent save)
+        await new Promise(r => setTimeout(r, 80));
+        chats = await doGet();
+      }
+      if (chats.length === 0) {
+        console.log('📭 No chats in storage (key empty or missing)');
+        return [];
+      }
+
       // Sort by updatedAt (most recent first)
       const sorted = chats.sort((a: Chat, b: Chat) => {
         const dateA = new Date(a.updatedAt || a.createdAt).getTime();
@@ -98,11 +109,11 @@ class ChatStorageService {
     try {
       console.log(`💾 Saving ${chats.length} chat(s) to storage...`);
       const chatsJson = JSON.stringify(chats);
-      await EncryptedStorage.setItem(ChatStorageService.CHATS_KEY, chatsJson);
+      await EncryptedStorage.setItem(CHATS_STORAGE_KEY, chatsJson);
       console.log(`✅ Successfully saved ${chats.length} chat(s) to storage`);
       
       // Verify save worked
-      const verify = await EncryptedStorage.getItem(ChatStorageService.CHATS_KEY);
+      const verify = await EncryptedStorage.getItem(CHATS_STORAGE_KEY);
       if (verify) {
         const verified = JSON.parse(verify);
         console.log(`✅ Verified: ${verified.length} chat(s) in storage`);
@@ -257,7 +268,7 @@ class ChatStorageService {
    */
   async updateChatWithMessage(chatId: string, message: Message, incrementUnread: boolean = true): Promise<void> {
     try {
-      const chats = await this.getChats();
+      let chats = await this.getChats();
       const currentDeviceId = await this.getCurrentDeviceId();
       
       // Normalize chatId for consistent lookup
@@ -303,35 +314,52 @@ class ChatStorageService {
         await this.saveChats(chats);
         console.log(`✅ Updated existing chat: ${normalizedChatId} (Total chats: ${chats.length})`);
       } else {
-        // Chat doesn't exist - CREATE IT
+        // Chat doesn't exist - retry getChats once to avoid overwriting due to flaky read
+        if (chats.length === 0) {
+          await new Promise(r => setTimeout(r, 50));
+          const retried = await this.getChats();
+          if (retried.length > 0) {
+            chats = retried;
+            chatIndex = chats.findIndex(chat =>
+              chat.id === chatId || chat.id === normalizedChatId || chat.id === baseChatId ||
+              this.getBaseChatId(chat.id) === baseChatId ||
+              chat.participantIds?.includes(message.senderId) ||
+              chat.participantIds?.includes(message.receiverId) ||
+              chat.otherUser?.id === message.senderId ||
+              chat.otherUser?.id === message.receiverId
+            );
+            if (chatIndex >= 0) {
+              chats[chatIndex].lastMessage = message;
+              chats[chatIndex].updatedAt = new Date().toISOString();
+              if (chats[chatIndex].id !== normalizedChatId) chats[chatIndex].id = normalizedChatId;
+              if (message.senderId !== currentDeviceId && !message.isDeleted && incrementUnread) {
+                chats[chatIndex].unreadCount = (chats[chatIndex].unreadCount || 0) + 1;
+              }
+              await this.saveChats(chats);
+              console.log(`✅ Updated existing chat after retry: ${normalizedChatId}`);
+              return;
+            }
+          }
+        }
+
+        // CREATE new chat
         console.log(`📝 Chat not found, creating new chat...`);
-        
-        // Determine sender/receiver info
         const isFromMe = message.senderId === currentDeviceId;
         const otherDeviceId = isFromMe ? message.receiverId : message.senderId;
         
         if (otherDeviceId) {
-          // Create chat with other device
           const otherUniqueCode = otherDeviceId.substring(0, 8).toUpperCase();
-          const otherName = 'Unknown User'; // Default name
-          
+          const otherName = 'Unknown User';
           const newChat: Chat = {
-            id: normalizedChatId, // Use normalized chatId
+            id: normalizedChatId,
             participantIds: [currentDeviceId, otherDeviceId],
-            otherUser: {
-              id: otherDeviceId,
-              name: otherName,
-              uniqueCode: otherUniqueCode,
-              isAppUser: true,
-            },
+            otherUser: { id: otherDeviceId, name: otherName, uniqueCode: otherUniqueCode, isAppUser: true },
             lastMessage: message,
             unreadCount: isFromMe ? 0 : (incrementUnread ? 1 : 0),
             isBlocked: false,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           };
-          
-          // Add to chats list
           chats.push(newChat);
           await this.saveChats(chats);
           console.log(`✅ Created new chat: ${normalizedChatId} with ${otherName} (${otherDeviceId})`);
@@ -349,6 +377,20 @@ class ChatStorageService {
    */
   async markChatAsRead(chatId: string): Promise<void> {
     await this.updateChat(chatId, {unreadCount: 0});
+  }
+
+  /**
+   * Clear whole chat history (messages + lastMessage on chat)
+   */
+  async clearChatHistory(chatId: string): Promise<void> {
+    try {
+      const {messageStorageService} = await import('./MessageStorageService');
+      await messageStorageService.clearMessages(chatId);
+      await this.updateChat(chatId, {lastMessage: undefined, unreadCount: 0});
+    } catch (error) {
+      console.error('Error clearing chat history:', error);
+      throw error;
+    }
   }
 
   /**

@@ -6,6 +6,8 @@ import {
   FlatList,
   TouchableOpacity,
   Image,
+  AppState,
+  AppStateStatus,
 } from 'react-native';
 import {useNavigation, useFocusEffect} from '@react-navigation/native';
 import {SafeAreaView} from 'react-native-safe-area-context';
@@ -22,43 +24,45 @@ const ChatsScreen: React.FC = () => {
   // Track typing status per chat
   const [typingStatus, setTypingStatus] = useState<{[chatId: string]: {isTyping: boolean; typingUser: string}}>({});
 
-  // Load chats when screen is focused (like WhatsApp)
+  // Subscribe to new messages and chat updates ONCE on mount; stay subscribed until unmount
+  // so chat list updates even when we're on ChatDetail or app was in background
+  useEffect(() => {
+    const unM = chatService.onMessage(() => {
+      console.log('📨 ChatsScreen: New message, reloading chats');
+      loadChats(true);
+    });
+    const unC = chatService.onChatUpdate(() => {
+      console.log('📨 ChatsScreen: Chat updated, reloading chats');
+      loadChats(true);
+    });
+    return () => {
+      unM();
+      unC();
+    };
+  }, []);
+
+  // When app comes to foreground, refresh chat list (in case we missed events while backgrounded)
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
+      if (next === 'active') {
+        console.log('📱 ChatsScreen: App active, refreshing chats');
+        loadChats(true);
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Load chats when screen is focused + connect + typing + periodic refresh
   useFocusEffect(
     useCallback(() => {
       console.log('📱 ChatsScreen: Screen focused, loading chats...');
-      
-      // Connect chat service to receive messages
       chatService.connect().then(() => {
         console.log('✅ Chat service connected in ChatsScreen');
         loadChats();
       }).catch((error) => {
         console.error('❌ Failed to connect chat service:', error);
-        // Still load chats even if connection fails
         loadChats();
-        // Retry connection
-        setTimeout(() => {
-          chatService.connect().catch(err => console.error('Retry connection failed:', err));
-        }, 3000);
-      });
-      
-      // Listen for new messages to update chat list
-      const messageUnsubscribe = chatService.onMessage(async (message: Message) => {
-        console.log('📨 ChatsScreen: New message received, reloading chats...', {
-          messageId: message.id,
-          chatId: message.chatId,
-          senderId: message.senderId,
-        });
-        // Reload chats when new message arrives (chat will be created/updated)
-        await loadChats();
-      });
-      
-      // Listen for chat updates (when chat is created/updated)
-      const chatUnsubscribe = chatService.onChatUpdate(async (chat: Chat) => {
-        console.log('📨 ChatsScreen: Chat updated, reloading chats...', {
-          chatId: chat.id,
-        });
-        // Reload chats when chat is updated
-        await loadChats();
+        setTimeout(() => chatService.connect().catch(() => {}), 3000);
       });
 
       // Listen for typing indicators
@@ -106,8 +110,7 @@ const ChatsScreen: React.FC = () => {
                   console.log(`⌨️ Auto-hiding typing for chat: ${data.chatId} (3s timeout)`);
                   return cleared;
                 });
-                // Refresh chats to update UI
-                loadChats();
+                loadChats(true);
               }, 3000);
             } else {
               // Stop typing
@@ -166,15 +169,10 @@ const ChatsScreen: React.FC = () => {
         }
       }, 1000);
       
-      // Also set up a periodic refresh (every 2 seconds) to catch any missed updates
-      const refreshInterval = setInterval(() => {
-        console.log('🔄 ChatsScreen: Periodic refresh...');
-        loadChats();
-      }, 2000);
+      // Periodic refresh (every 5 seconds) to catch missed updates; 2s was too aggressive
+      const refreshInterval = setInterval(() => loadChats(true), 5000);
       
       return () => {
-        if (messageUnsubscribe) messageUnsubscribe();
-        if (chatUnsubscribe) chatUnsubscribe();
         if (typingUnsubscribe) typingUnsubscribe();
         if (typingSetupTimeout) clearTimeout(typingSetupTimeout);
         if (refreshInterval) clearInterval(refreshInterval);
@@ -182,9 +180,9 @@ const ChatsScreen: React.FC = () => {
     }, [])
   );
 
-  const loadChats = async () => {
+  const loadChats = async (silent?: boolean) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       console.log('📥 Loading chats from storage...');
       const loadedChats = await chatStorageService.getChats();
       console.log(`✅ Loaded ${loadedChats.length} chat(s) from storage`);

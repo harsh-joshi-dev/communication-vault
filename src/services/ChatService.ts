@@ -233,59 +233,30 @@ class ChatService {
           await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, true);
           console.log('✅ Chat updated/created with new message:', normalizedChatId, 'status:', messageWithStatus.status);
           
-          // Notify chat listeners that chat was updated - CRITICAL: This updates chat list on both sides
+          // Notify chat listeners so ChatsScreen refreshes (both sides)
+          const msgBase = (message.chatId || '').replace(/^chat_/, '');
           this.chatListeners.forEach((listener, index) => {
             try {
-              // Get the updated chat from storage
               chatStorageService.getChats().then(chats => {
-                const updatedChat = chats.find(c => {
-                  const normalizedChatId = c.id?.replace(/^chat_/, '') || '';
-                  const normalizedMessageChatId = normalizedChatId.replace(/^chat_/, '');
-                  return normalizedChatId === normalizedMessageChatId || c.id === normalizedChatId;
+                const c = chats.find(ch => {
+                  const base = (ch.id || '').replace(/^chat_/, '');
+                  return base === msgBase || ch.id === message.chatId || ch.id === normalizedChatId;
                 });
-                
-                if (updatedChat) {
-                  listener(updatedChat);
-                  console.log(`✅ Chat listener ${index} notified with updated chat`);
-                } else {
-                  // Chat might not exist yet, notify anyway to trigger refresh
-                  listener({} as Chat);
-                  console.log(`✅ Chat listener ${index} notified (chat will be created)`);
-                }
-              }).catch(err => {
-                console.error(`❌ Error getting chat for listener ${index}:`, err);
-                // Still notify to trigger refresh
-                listener({} as Chat);
-              });
-            } catch (error) {
-              console.error(`❌ Chat listener ${index} error:`, error);
+                listener(c || ({} as Chat));
+              }).catch(() => listener({} as Chat));
+            } catch {
+              listener({} as Chat);
             }
           });
         } catch (error: any) {
           console.error('❌ Error updating chat:', error);
         }
 
-        // ALWAYS notify listeners (they handle duplicate checking)
         console.log(`📢 Notifying ${this.messageListeners.length} message listener(s)`);
-        this.messageListeners.forEach((listener, index) => {
-          try {
-            listener(message);
-            console.log(`✅ Listener ${index} notified`);
-          } catch (error) {
-            console.error(`❌ Listener ${index} error:`, error);
-          }
+        this.messageListeners.forEach((listener, i) => {
+          try { listener(message); } catch (e) { console.error(`Message listener ${i} error:`, e); }
         });
-        
-        // Notify chat listeners
-        this.chatListeners.forEach(listener => {
-          try {
-            listener({} as Chat); // Chat listeners will handle update
-          } catch (error) {
-            console.error('Chat listener error:', error);
-          }
-        });
-        
-        console.log('✅ All listeners notified successfully');
+        console.log('✅ All listeners notified');
       } catch (error: any) {
         console.error('❌ CRITICAL: Error handling new message:', error);
         console.error('Error stack:', error.stack);
@@ -340,6 +311,11 @@ class ChatService {
     return () => {
       this.chatListeners = this.chatListeners.filter(l => l !== listener);
     };
+  }
+
+  /** Notify chat list to refresh (e.g. after clear history) */
+  notifyChatListRefresh(): void {
+    this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
   }
 
   onMessageStatusUpdate(listener: (update: {
@@ -470,12 +446,17 @@ class ChatService {
 
     return new Promise((resolve) => {
       // Set timeout for response (increased for better reliability)
-      const timeout = setTimeout(() => {
+      const timeout = setTimeout(async () => {
         console.warn('⏱️ No response from server after 20s, using optimistic message');
         message.status = 'sent';
         messageStorageService.saveMessage(message).catch(console.error);
+        try {
+          const {chatStorageService} = await import('./ChatStorageService');
+          await chatStorageService.updateChatWithMessage(chatId, message, false);
+        } catch (e) {}
+        this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
         resolve(message);
-      }, 20000); // Increased from 15s to 20s
+      }, 20000);
 
       // Send message
       if (this.socket?.connected && this.isAuthenticated) {
@@ -494,6 +475,10 @@ class ChatService {
             console.error('❌ Server error:', response.error);
             message.status = 'pending';
             messageStorageService.saveMessage(message).catch(console.error);
+            import('./ChatStorageService').then(({chatStorageService}) =>
+              chatStorageService.updateChatWithMessage(chatId, message, false)
+            ).catch(() => {});
+            this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
             resolve(message);
             return;
           }
@@ -513,38 +498,42 @@ class ChatService {
               deliveredAt: response.message.deliveredAt || response.message.delivered_at,
             };
             
-            // Update chatId if server returned a different one (chat was created)
             if (serverMessage.chatId !== chatId) {
               console.log(`📝 Chat ID updated: ${chatId} -> ${serverMessage.chatId}`);
-              // Join the new chat room
               await this.joinChat(serverMessage.chatId);
-              // Update message's chatId
-              serverMessage.chatId = serverMessage.chatId;
             } else {
-              // Ensure we're in the chat room
               await this.joinChat(chatId);
             }
-            
-            await messageStorageService.saveMessage(serverMessage);
-            
-            // Update chat storage with new chatId if changed
+
+            // Replace optimistic message with server message in storage (avoid duplicates)
+            const cur = await messageStorageService.getMessages(serverMessage.chatId || chatId);
+            const without = cur.filter(m => (m.id || (m as any)._id) !== message.id);
+            const idx = without.findIndex(m => (m.id || (m as any)._id) === serverMessage.id);
+            const toSave = idx >= 0
+              ? without.map((m, i) => (i === idx ? serverMessage : m))
+              : [...without, serverMessage];
+            await messageStorageService.saveMessages(serverMessage.chatId || chatId, toSave);
+            const {chatStorageService} = await import('./ChatStorageService');
             if (serverMessage.chatId !== chatId) {
               try {
-                const {chatStorageService} = await import('./ChatStorageService');
                 await chatStorageService.updateChatId(chatId, serverMessage.chatId);
-              } catch (error) {
-                console.error('Error updating chat ID:', error);
+              } catch (e) {
+                console.error('Error updating chat ID:', e);
               }
             }
-            
+            await chatStorageService.updateChatWithMessage(serverMessage.chatId || chatId, serverMessage, false);
+            this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
             resolve(serverMessage);
           } else {
-            // No error but no message - assume success but log warning
             console.warn('⚠️ Server responded but no message in response, assuming success');
             message.status = 'sent';
             await messageStorageService.saveMessage(message);
-            // Still join chat room
             await this.joinChat(chatId);
+            try {
+              const {chatStorageService} = await import('./ChatStorageService');
+              await chatStorageService.updateChatWithMessage(chatId, message, false);
+            } catch (e) {}
+            this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
             resolve(message);
           }
         });
@@ -553,6 +542,10 @@ class ChatService {
         console.warn('⚠️ Socket not connected, message saved locally');
         message.status = 'pending';
         messageStorageService.saveMessage(message).catch(console.error);
+        import('./ChatStorageService').then(({chatStorageService}) =>
+          chatStorageService.updateChatWithMessage(chatId, message, false)
+        ).catch(() => {});
+        this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
         resolve(message);
       }
     });

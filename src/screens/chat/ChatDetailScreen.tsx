@@ -19,6 +19,7 @@ import {format} from 'date-fns';
 import {chatService} from '../../services/ChatService';
 import {deviceService} from '../../services/DeviceService';
 import {chatStorageService} from '../../services/ChatStorageService';
+import {messageStorageService} from '../../services/MessageStorageService';
 import {launchImageLibrary} from 'react-native-image-picker';
 import DocumentPicker from 'react-native-document-picker';
 import AudioRecorderPlayer from 'react-native-audio-recorder-player';
@@ -402,6 +403,33 @@ const ChatDetailScreen: React.FC = () => {
     setEditNameText('');
   };
 
+  /**
+   * Clear whole chat history (with confirmation)
+   */
+  const handleClearChatHistory = () => {
+    Alert.alert(
+      'Clear Chat History',
+      'Delete all messages in this chat? This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await chatStorageService.clearChatHistory(chatId);
+              setMessages([]);
+              chatService.notifyChatListRefresh();
+            } catch (e) {
+              console.error('Clear chat history error:', e);
+              Alert.alert('Error', 'Failed to clear chat history');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   // Normalize chatId (remove or add 'chat_' prefix for consistency)
   const normalizeChatId = (id: string): string => {
     if (!id) return id;
@@ -440,9 +468,9 @@ const ChatDetailScreen: React.FC = () => {
       const allMsgs = allMessagesArrays.flat();
       console.log(`✅ Loaded ${allMsgs.length} total message(s) from storage (across ${uniqueVariants.length} variants)`);
       
-      // Deduplicate messages by ID (keep only unique messages)
+      // Deduplicate by id (use id or _id so same message from different keys collapses to one)
       const uniqueMessages = Array.from(
-        new Map(allMsgs.map(msg => [msg.id, msg])).values()
+        new Map(allMsgs.map(msg => [msg.id || (msg as any)._id, msg])).values()
       );
       
       // Filter messages that match this chat (normalize their chatIds too)
@@ -569,12 +597,11 @@ const ChatDetailScreen: React.FC = () => {
           const updated = [...prev];
           updated[existingIndex] = normalizedMessage;
           
-          // CRITICAL: Deduplicate entire array as safety measure (same ID might appear twice)
+          // Deduplicate by id (same ID might appear twice)
           const uniqueMap = new Map<string, Message>();
           updated.forEach(msg => {
-            if (msg.id && !uniqueMap.has(msg.id)) {
-              uniqueMap.set(msg.id, msg);
-            }
+            const k = msg.id || (msg as any)._id;
+            if (k && !uniqueMap.has(k)) uniqueMap.set(k, msg);
           });
           
           const uniqueMessages = Array.from(uniqueMap.values());
@@ -591,12 +618,11 @@ const ChatDetailScreen: React.FC = () => {
         // Add new message
         const updated = [...prev, normalizedMessage];
         
-        // CRITICAL: Deduplicate by ID (Map ensures uniqueness)
+        // Deduplicate by id (Map ensures uniqueness)
         const uniqueMap = new Map<string, Message>();
         updated.forEach(msg => {
-          if (msg.id && !uniqueMap.has(msg.id)) {
-            uniqueMap.set(msg.id, msg);
-          }
+          const k = msg.id || (msg as any)._id;
+          if (k && !uniqueMap.has(k)) uniqueMap.set(k, msg);
         });
         
         const uniqueMessages = Array.from(uniqueMap.values());
@@ -611,19 +637,10 @@ const ChatDetailScreen: React.FC = () => {
         return sortedMessages;
       });
       
-      // Scroll to bottom
-      setTimeout(() => scrollToBottom(true), 100);
-      
-      // Update chat storage
+      setTimeout(() => scrollToBottom(true), 150);
       const messageChatId = message.chatId || chatId;
-      chatStorageService.updateChatWithMessage(messageChatId, message, false).catch(err => 
-        console.error('Error updating chat:', err)
-      );
-      
-      // Mark as read
-      chatService.markAsRead(messageChatId, [message.id]).catch(err => 
-        console.error('Error marking as read:', err)
-      );
+      chatStorageService.updateChatWithMessage(messageChatId, message, false).catch(() => {});
+      chatService.markAsRead(messageChatId, [message.id]).catch(() => {});
     });
     
     // Store unsubscribe function for cleanup
@@ -631,11 +648,12 @@ const ChatDetailScreen: React.FC = () => {
   };
 
   const scrollToBottom = (animated: boolean = true) => {
-    // Use requestAnimationFrame for ultra-smooth scrolling
     requestAnimationFrame(() => {
-      if (flatListRef.current && messages.length > 0) {
-        flatListRef.current.scrollToEnd({animated});
-      }
+      requestAnimationFrame(() => {
+        if (flatListRef.current) {
+          flatListRef.current.scrollToEnd({animated});
+        }
+      });
     });
   };
 
@@ -1282,14 +1300,9 @@ const ChatDetailScreen: React.FC = () => {
               'Chat Options',
               '',
               [
-                {
-                  text: 'Edit Chat Name',
-                  onPress: handleEditChatName,
-                },
-                {
-                  text: 'Cancel',
-                  style: 'cancel',
-                },
+                { text: 'Edit Chat Name', onPress: handleEditChatName },
+                { text: 'Clear Chat History', onPress: handleClearChatHistory, style: 'destructive' },
+                { text: 'Cancel', style: 'cancel' },
               ]
             );
           }}>

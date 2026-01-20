@@ -209,35 +209,20 @@ class MessageStorageService {
       }
       
       if (!messages || !foundKey) {
-        // Message not found in any key - try loading all messages to find it
-        console.log(`⚠️ Message ${messageId} not found in direct keys, searching all chats...`);
         const allMessages = await this.getMessages(chatId);
-        const messageIndex = allMessages.findIndex(msg => msg.id === messageId);
-        
+        const messageIndex = allMessages.findIndex(msg => (msg.id || (msg as any)._id) === messageId);
         if (messageIndex >= 0) {
-          // Found message in getMessages - update it and save
           allMessages[messageIndex].status = status;
-          if (deliveredAt) {
-            allMessages[messageIndex].deliveredAt = deliveredAt;
-          }
-          if (readAt) {
-            allMessages[messageIndex].readAt = readAt;
-          }
-          
-          // Save to normalized key
+          if (deliveredAt) allMessages[messageIndex].deliveredAt = deliveredAt;
+          if (readAt) allMessages[messageIndex].readAt = readAt;
           const key = `${MessageStorageService.MESSAGES_KEY_PREFIX}${normalizedChatId}`;
           await EncryptedStorage.setItem(key, JSON.stringify(allMessages));
-          console.log(`✅ Message status updated via getMessages: ${messageId} -> ${status}`);
-          
-          // Also save to other formats
           for (const otherKey of keys) {
-            if (otherKey !== key) {
-              await EncryptedStorage.setItem(otherKey, JSON.stringify(allMessages));
-            }
+            if (otherKey !== key) await EncryptedStorage.setItem(otherKey, JSON.stringify(allMessages));
           }
-        } else {
-          console.warn(`⚠️ Message ${messageId} not found in any storage key for chat ${chatId}`);
+          console.log(`✅ Message status updated via getMessages: ${messageId} -> ${status}`);
         }
+        // Status update can arrive before message is saved (race); avoid noisy warn
         return;
       }
       
@@ -271,12 +256,19 @@ class MessageStorageService {
   }
 
   /**
-   * Clear all messages for a chat
+   * Clear all messages for a chat (removes all key variants)
    */
   async clearMessages(chatId: string): Promise<void> {
     try {
-      const key = `${MessageStorageService.MESSAGES_KEY_PREFIX}${chatId}`;
-      await EncryptedStorage.removeItem(key);
+      const n = this.normalizeChatId(chatId);
+      const keys = [
+        `${MessageStorageService.MESSAGES_KEY_PREFIX}${chatId}`,
+        `${MessageStorageService.MESSAGES_KEY_PREFIX}${n}`,
+        `${MessageStorageService.MESSAGES_KEY_PREFIX}chat_${n}`,
+      ];
+      for (const key of keys) {
+        await EncryptedStorage.removeItem(key);
+      }
     } catch (error) {
       console.error('Error clearing messages:', error);
     }

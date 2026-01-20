@@ -310,19 +310,21 @@ def register_socket_handlers(socketio_instance):
                 'createdAt': datetime.utcnow().isoformat(),
             }
             
-            # Find receiver's actual deviceId from active connections
             receiver_actual_device_id = None
-            
-            # Priority 1: Find by uniqueCode (from QR code)
+            receiver_code_room = None  # exact room receiver joined (code_X), for reliable delivery
+
+            # Priority 1: Find by uniqueCode (from QR code) - case-insensitive
             if receiver_unique_code:
-                print(f"🔍 Looking for device with uniqueCode: {receiver_unique_code}")
+                rc = (receiver_unique_code or '').strip().upper()
+                print(f"🔍 Looking for device with uniqueCode: {receiver_unique_code} (normalized: {rc})")
                 print(f"   Active sessions: {len(device_sessions)} devices connected")
                 for sid, session_data in device_sessions.items():
-                    session_unique_code = session_data.get('unique_code')
-                    session_device_id = session_data.get('device_id')
-                    if session_unique_code == receiver_unique_code:
-                        receiver_actual_device_id = session_device_id
-                        print(f"✅ FOUND: Device {receiver_actual_device_id} has uniqueCode {receiver_unique_code}")
+                    su = (session_data.get('unique_code') or '').strip().upper()
+                    if su and su == rc:
+                        receiver_actual_device_id = session_data.get('device_id')
+                        # use exact room name the receiver joined (case-sensitive)
+                        receiver_code_room = 'code_{}'.format(session_data.get('unique_code') or receiver_unique_code)
+                        print(f"✅ FOUND: Device {receiver_actual_device_id} has uniqueCode {receiver_unique_code}, room={receiver_code_room}")
                         break
             
             # Priority 2: Use receiverId from data if not found
@@ -353,10 +355,13 @@ def register_socket_handlers(socketio_instance):
             socketio_instance.emit('new_message', message_dict, room=f'chat_{chat_id_str}')
             print(f"   ✅ [1/6] Emitted to chat room: chat_{chat_id_str}")
             
-            # 2. Emit to receiver's code room (MOST IMPORTANT - this is where QR code receivers are)
-            if receiver_unique_code:
+            # 2. Emit to receiver's code room (use exact room they joined; fallback to code_{receiver_unique_code})
+            if receiver_code_room:
+                socketio_instance.emit('new_message', message_dict, room=receiver_code_room)
+                print(f"📤 [2] ⭐ Emitted to code room: {receiver_code_room} (RECEIVER IS HERE)")
+            elif receiver_unique_code:
                 socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_unique_code}')
-                print(f"📤 [2] ⭐ Emitted to code room: code_{receiver_unique_code} (RECEIVER IS HERE)")
+                print(f"📤 [2] Emitted to code room (fallback): code_{receiver_unique_code}")
             
             # 3. Emit to receiver's device room (if we have actual deviceId)
             if receiver_actual_device_id and receiver_actual_device_id != receiver_unique_code:
