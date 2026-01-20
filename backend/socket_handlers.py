@@ -333,7 +333,6 @@ def register_socket_handlers(socketio_instance):
             if mongo_available:
                 try:
                     from models_mongo import Message, Chat, PendingMessage
-                    from datetime import datetime
                     
                     # Save message to MongoDB
                     saved_message = Message(
