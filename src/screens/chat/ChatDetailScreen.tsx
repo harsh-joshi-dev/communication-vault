@@ -48,21 +48,36 @@ const ChatDetailScreen: React.FC = () => {
   const [audioProgress, setAudioProgress] = useState<{[key: string]: number}>({});
   const [audioDuration, setAudioDuration] = useState<{[key: string]: number}>({});
   const [currentDeviceId, setCurrentDeviceId] = useState<string>('');
+  const [chatName, setChatName] = useState<string>(contactName); // Chat name (can be edited)
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editNameText, setEditNameText] = useState<string>('');
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const flatListRef = useRef<FlatList>(null);
   const audioRecorderPlayer = useRef(new AudioRecorderPlayer()).current;
 
-  // Reload messages when screen comes into focus (like WhatsApp)
+  // Reload messages and chat name when screen comes into focus (like WhatsApp)
   useFocusEffect(
     React.useCallback(() => {
       // Load messages every time screen is focused
       loadMessages();
+      // Load chat name from storage
+      loadChatName();
       // Mark chat as read when opening
       chatStorageService.markChatAsRead(chatId);
     }, [chatId])
   );
+
+  // Debug: Log when messages state changes
+  useEffect(() => {
+    console.log(`📊 Messages state changed: ${messages.length} message(s)`);
+    if (messages.length > 0) {
+      console.log(`   Message IDs: ${messages.map(m => m.id).join(', ')}`);
+      console.log(`   First message: ${messages[0].content?.substring(0, 30)}`);
+      console.log(`   Last message: ${messages[messages.length - 1].content?.substring(0, 30)}`);
+    }
+  }, [messages]);
 
   useEffect(() => {
     // Get current device ID
@@ -109,6 +124,12 @@ const ChatDetailScreen: React.FC = () => {
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
       }
+      if (typingEmissionTimeoutRef.current) {
+        clearTimeout(typingEmissionTimeoutRef.current);
+      }
+      if (typingStopTimeoutRef.current) {
+        clearTimeout(typingStopTimeoutRef.current);
+      }
       if (recordingIntervalRef.current) {
         clearInterval(recordingIntervalRef.current);
       }
@@ -138,8 +159,21 @@ const ChatDetailScreen: React.FC = () => {
     if (!socket) return;
     
     socket.on('user_typing', async (data: {deviceId: string; deviceName: string; chatId: string; isTyping: boolean}) => {
+      console.log('⌨️ ChatDetailScreen: Typing event received:', data);
+      
       const currentDevice = await deviceService.getDeviceId();
-      if (data.chatId === chatId && data.deviceId !== currentDevice) {
+      const normalizedDataChatId = normalizeChatId(data.chatId);
+      const normalizedCurrentChatId = normalizeChatId(chatId);
+      
+      // Check if this typing event is for the current chat
+      const matchesChat = data.chatId === chatId ||
+                         normalizedDataChatId === normalizedCurrentChatId ||
+                         data.chatId === normalizedCurrentChatId ||
+                         normalizedDataChatId === chatId;
+      
+      if (matchesChat && data.deviceId !== currentDevice) {
+        console.log(`⌨️ Someone is typing in current chat: ${data.deviceName} (${data.isTyping ? 'typing' : 'stopped'})`);
+        
         setIsTyping(data.isTyping);
         setTypingUser(data.isTyping ? data.deviceName : null);
         
@@ -149,10 +183,13 @@ const ChatDetailScreen: React.FC = () => {
         }
         if (data.isTyping) {
           typingTimeoutRef.current = setTimeout(() => {
+            console.log('⌨️ Auto-hiding typing indicator (3s timeout)');
             setIsTyping(false);
             setTypingUser(null);
           }, 3000);
         }
+      } else {
+        console.log(`⌨️ Typing event ignored (not for current chat or from me)`);
       }
     });
   };
@@ -161,29 +198,65 @@ const ChatDetailScreen: React.FC = () => {
     const socket = (chatService as any).socketInstance;
     if (!socket) return;
     
-    socket.on('message_status_update', (data: {messageId: string; status: string; deliveredAt?: string; readAt?: string}) => {
+    socket.on('message_status_update', async (data: {messageId: string; status: string; deliveredAt?: string; readAt?: string}) => {
+      console.log('📨 Status update received:', data);
+      
+      // Update state
       setMessages(prev => prev.map(msg => {
         if (msg.id === data.messageId) {
-          return {
+          const updated = {
             ...msg,
             status: data.status as any,
             deliveredAt: data.deliveredAt,
             readAt: data.readAt,
           };
+          
+          // Persist to storage
+          const {messageStorageService} = require('../../services/MessageStorageService');
+          messageStorageService.updateMessageStatus(
+            chatId,
+            data.messageId,
+            data.status as any,
+            data.deliveredAt,
+            data.readAt
+          ).catch(err => console.error('Error saving status update:', err));
+          
+          return updated;
         }
         return msg;
       }));
     });
 
-    socket.on('messages_read', (data: {chatId: string; messageIds: string[]; readAt: string}) => {
-      if (data.chatId === chatId) {
+    socket.on('messages_read', async (data: {chatId: string; messageIds: string[]; readAt: string}) => {
+      console.log('📨 Messages read event:', data);
+      
+      // Normalize chatId for comparison
+      const normalizedDataChatId = normalizeChatId(data.chatId);
+      const normalizedCurrentChatId = normalizeChatId(chatId);
+      
+      if (normalizedDataChatId === normalizedCurrentChatId) {
+        console.log('✅ Messages read for current chat, updating status...');
+        
+        // Update state and persist to storage
         setMessages(prev => prev.map(msg => {
           if (data.messageIds.includes(msg.id)) {
-            return {
+            const updated = {
               ...msg,
               status: 'read' as any,
               readAt: data.readAt,
             };
+            
+            // Persist to storage
+            const {messageStorageService} = require('../../services/MessageStorageService');
+            messageStorageService.updateMessageStatus(
+              chatId,
+              msg.id,
+              'read',
+              undefined,
+              data.readAt
+            ).catch(err => console.error('Error saving read status:', err));
+            
+            return updated;
           }
           return msg;
         }));
@@ -191,17 +264,68 @@ const ChatDetailScreen: React.FC = () => {
     });
   };
 
+  // Track typing emission to avoid spam
+  const typingEmissionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const typingStopTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isTypingEmittedRef = useRef<boolean>(false);
+  
   const handleTyping = (text: string) => {
     setInputText(text);
     
     const socket = (chatService as any).socketInstance;
-    if (!socket?.connected || !chatId) return;
+    if (!socket?.connected || !chatId) {
+      console.log('⚠️ Cannot emit typing - socket not connected or no chatId');
+      return;
+    }
     
-    // Emit typing indicator
-    socket.emit('typing', {
-      chatId,
-      isTyping: text.length > 0,
-    });
+    // Clear any existing stop timeout (reset timer on new keystroke)
+    if (typingStopTimeoutRef.current) {
+      clearTimeout(typingStopTimeoutRef.current);
+      typingStopTimeoutRef.current = null;
+    }
+    
+    const isTyping = text.length > 0;
+    
+    // Clear previous emission timeout
+    if (typingEmissionTimeoutRef.current) {
+      clearTimeout(typingEmissionTimeoutRef.current);
+      typingEmissionTimeoutRef.current = null;
+    }
+    
+    if (isTyping) {
+      // User is typing - debounce emission (300ms)
+      typingEmissionTimeoutRef.current = setTimeout(() => {
+        // Emit typing indicator if not already emitted
+        if (!isTypingEmittedRef.current) {
+          console.log(`⌨️ Emitting typing indicator: START typing in chat ${chatId}`);
+          
+          // Emit to all possible chatId formats to ensure delivery
+          socket.emit('typing', {chatId, isTyping: true});
+          socket.emit('typing', {chatId: chatId.replace(/^chat_/, ''), isTyping: true});
+          socket.emit('typing', {chatId: `chat_${chatId.replace(/^chat_/, '')}`, isTyping: true});
+          
+          isTypingEmittedRef.current = true;
+        }
+        
+        // Set auto-stop timeout (3 seconds after last keystroke)
+        typingStopTimeoutRef.current = setTimeout(() => {
+          console.log('⌨️ Auto-stopping typing indicator (3s timeout)');
+          socket.emit('typing', {chatId, isTyping: false});
+          socket.emit('typing', {chatId: chatId.replace(/^chat_/, ''), isTyping: false});
+          socket.emit('typing', {chatId: `chat_${chatId.replace(/^chat_/, '')}`, isTyping: false});
+          isTypingEmittedRef.current = false;
+        }, 3000);
+      }, 300);
+    } else {
+      // Text is empty - stop typing immediately if was typing
+      if (isTypingEmittedRef.current) {
+        console.log(`⌨️ Emitting typing indicator: STOP typing in chat ${chatId} (input cleared)`);
+        socket.emit('typing', {chatId, isTyping: false});
+        socket.emit('typing', {chatId: chatId.replace(/^chat_/, ''), isTyping: false});
+        socket.emit('typing', {chatId: `chat_${chatId.replace(/^chat_/, '')}`, isTyping: false});
+        isTypingEmittedRef.current = false;
+      }
+    }
   };
 
   const handleCall = () => {
@@ -210,22 +334,154 @@ const ChatDetailScreen: React.FC = () => {
   };
 
   const handleVideoCall = () => {
-    Alert.alert('Video Call', `Starting video call with ${contactName}...`);
+    Alert.alert('Video Call', `Starting video call with ${chatName}...`);
     // TODO: Implement actual video call functionality
+  };
+
+  /**
+   * Load chat name from storage (user's custom name for the chat)
+   */
+  const loadChatName = async () => {
+    try {
+      const chat = await chatStorageService.getChat(chatId);
+      if (chat && chat.otherUser?.name) {
+        setChatName(chat.otherUser.name);
+      }
+    } catch (error) {
+      console.error('Error loading chat name:', error);
+    }
+  };
+
+  /**
+   * Handle editing chat name - shows a custom input modal
+   */
+  const handleEditChatName = () => {
+    setEditNameText(chatName === contactName ? '' : chatName);
+    setIsEditingName(true);
+  };
+
+  /**
+   * Save edited chat name
+   */
+  const handleSaveChatName = async () => {
+    const newName = editNameText.trim();
+    
+    if (newName) {
+      try {
+        await chatStorageService.updateChatName(chatId, newName);
+        setChatName(newName);
+        // Update navigation params
+        navigation.setParams({contactName: newName});
+          // Notify chat listeners to reload chat list
+          // The chat list will refresh via the chat listeners automatically
+        console.log(`✅ Chat name updated to: "${newName}"`);
+        setIsEditingName(false);
+      } catch (error) {
+        console.error('❌ Error updating chat name:', error);
+        Alert.alert('Error', 'Failed to update chat name');
+      }
+    } else {
+      // Reset to default name if empty
+      try {
+        await chatStorageService.updateChatName(chatId, contactName);
+        setChatName(contactName);
+        navigation.setParams({contactName: contactName});
+        console.log(`✅ Chat name reset to default: "${contactName}"`);
+        setIsEditingName(false);
+      } catch (error) {
+        console.error('❌ Error resetting chat name:', error);
+      }
+    }
+  };
+
+  /**
+   * Cancel editing chat name
+   */
+  const handleCancelEditName = () => {
+    setIsEditingName(false);
+    setEditNameText('');
+  };
+
+  // Normalize chatId (remove or add 'chat_' prefix for consistency)
+  const normalizeChatId = (id: string): string => {
+    if (!id) return id;
+    // Remove 'chat_' prefix if present
+    return id.replace(/^chat_/, '');
   };
 
   const loadMessages = async () => {
     try {
-      console.log('📥 Loading messages for chat:', chatId);
-      const msgs = await chatService.getMessages(chatId);
-      console.log(`✅ Loaded ${msgs.length} message(s) from storage`);
+      const normalizedChatId = normalizeChatId(chatId);
+      console.log('📥 Loading messages for chat:', chatId, '(normalized:', normalizedChatId + ')');
       
-      // Messages are already sorted and filtered by getMessages (oldest to newest)
+      // Get current device ID to determine which messages are "mine"
+      const currentDevice = await deviceService.getDeviceInfo();
+      const myDeviceId = currentDevice.deviceId;
+      
+      // Try loading with multiple chatId formats to ensure we get all messages
+      const chatIdVariants = [
+        chatId,
+        normalizedChatId,
+        normalizedChatId.replace(/^chat_/, ''),
+        `chat_${normalizedChatId}`,
+      ];
+      
+      // Remove duplicates
+      const uniqueVariants = Array.from(new Set(chatIdVariants.filter(Boolean)));
+      
+      console.log(`📥 Trying to load messages with chatId variants:`, uniqueVariants);
+      
+      // Load from all variants
+      const allMessagesArrays = await Promise.all(
+        uniqueVariants.map(id => chatService.getMessages(id))
+      );
+      
+      // Flatten and combine all messages
+      const allMsgs = allMessagesArrays.flat();
+      console.log(`✅ Loaded ${allMsgs.length} total message(s) from storage (across ${uniqueVariants.length} variants)`);
+      
+      // Deduplicate messages by ID (keep only unique messages)
+      const uniqueMessages = Array.from(
+        new Map(allMsgs.map(msg => [msg.id, msg])).values()
+      );
+      
+      // Filter messages that match this chat (normalize their chatIds too)
+      // Also include messages where sender or receiver matches (for device-based chats)
+      const matchingMessages = uniqueMessages.filter(msg => {
+        const msgChatId = normalizeChatId(msg.chatId || '');
+        const msgMatchesChatId = msgChatId === normalizedChatId || 
+                                 msg.chatId === chatId || 
+                                 msg.chatId === normalizedChatId ||
+                                 msgChatId === chatId ||
+                                 msg.chatId === `chat_${normalizedChatId}` ||
+                                 msgChatId === `chat_${normalizedChatId}`;
+        
+        // Also match if sender or receiver is part of this chat
+        const msgMatchesParticipants = (msg.senderId === myDeviceId || 
+                                        msg.receiverId === myDeviceId ||
+                                        msg.senderId === receiverId ||
+                                        msg.receiverId === receiverId);
+        
+        return msgMatchesChatId || msgMatchesParticipants;
+      });
+      
+      // Sort by timestamp
+      const sortedMessages = matchingMessages.sort((a, b) => {
+        const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
+        const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
+        return dateA - dateB;
+      });
+      
+      console.log(`✅ Filtered and deduplicated: ${allMsgs.length} → ${sortedMessages.length} unique messages for this chat`);
+      console.log(`📋 Message details:`);
+      sortedMessages.forEach((msg, idx) => {
+        console.log(`   ${idx + 1}. ${msg.id} - ${msg.senderId === myDeviceId ? 'ME' : 'THEM'}: ${msg.content?.substring(0, 30) || msg.type}`);
+      });
+      
       // Set messages - WhatsApp style: oldest at top, newest at bottom
-      setMessages(msgs);
+      setMessages(sortedMessages);
       
       // Scroll to bottom (newest messages) after messages are set
-      // Use multiple attempts to ensure scroll works
       setTimeout(() => {
         scrollToBottom(false); // No animation on initial load for speed
       }, 50);
@@ -234,7 +490,6 @@ const ChatDetailScreen: React.FC = () => {
       }, 200);
     } catch (error) {
       console.error('❌ Error loading messages:', error);
-      // Still set empty array so UI doesn't break
       setMessages([]);
     }
   };
@@ -249,32 +504,44 @@ const ChatDetailScreen: React.FC = () => {
         content: message.content?.substring(0, 30),
       });
       
+      // Normalize chatIds for comparison
+      const normalizedCurrentChatId = normalizeChatId(chatId);
+      const normalizedMessageChatId = normalizeChatId(message.chatId || '');
+      
       // Check if message is for this chat
-      // Also check if sender/receiver match (in case chatId changed)
       const deviceInfo = await deviceService.getDeviceInfo();
       const isFromReceiver = message.senderId === receiverId || message.senderId === receiverUniqueCode;
       const isToMe = message.receiverId === deviceInfo.deviceId || message.receiverId === deviceInfo.uniqueCode || !message.receiverId;
-      const matchesChat = message.chatId === chatId || 
+      
+      // Match chatId (with or without prefix)
+      const matchesChat = normalizedMessageChatId === normalizedCurrentChatId || 
+                         message.chatId === chatId ||
                          (message.chatId && chatId && (
-                           message.chatId.replace('chat_', '') === chatId.replace('chat_', '')
+                           message.chatId.replace(/^chat_/, '') === chatId.replace(/^chat_/, '')
                          ));
       
       // Show message if:
-      // 1. ChatId matches, OR
+      // 1. ChatId matches (normalized), OR
       // 2. Message is from/to the receiver we're chatting with
       const shouldShow = matchesChat || (isFromReceiver && isToMe);
       
       if (!shouldShow) {
-        console.log('⚠️ Message not for this chat, ignoring');
+        console.log('⚠️ Message not for this chat, ignoring', {
+          messageChatId: normalizedMessageChatId,
+          currentChatId: normalizedCurrentChatId,
+          matches: matchesChat,
+          isFromReceiver,
+          isToMe
+        });
         return;
       }
       
       console.log('✅ Message is for this chat, displaying it');
       
-      // Update chatId if server sent different one
-      if (message.chatId && message.chatId !== chatId) {
-        console.log(`📝 Updating chatId: ${chatId} -> ${message.chatId}`);
-        // Update route params if possible (future improvement)
+      // Normalize message chatId to match current chatId format
+      if (message.chatId && normalizedMessageChatId === normalizedCurrentChatId) {
+        // Update message chatId to match current format for consistency
+        message.chatId = chatId; // Use current chatId format
       }
       
       if (message.isDeleted) {
@@ -282,19 +549,66 @@ const ChatDetailScreen: React.FC = () => {
         return;
       }
       
-      // Update messages list
+      // Update messages list - ensure no duplicates and proper chatId
       setMessages(prev => {
-        const exists = prev.find(msg => msg.id === message.id);
-        if (exists) {
-          // Update existing
-          return prev.map(msg => msg.id === message.id ? message : msg);
+        // CRITICAL: Normalize message chatId to match current chatId format
+        const normalizedMessage = {
+          ...message,
+          chatId: chatId, // Use current chatId format for consistency
+        };
+        
+        console.log(`📝 Processing message: ${normalizedMessage.id}, chatId: ${normalizedMessage.chatId}`);
+        
+        // Check if message already exists BY ID (not by reference)
+        const existingIndex = prev.findIndex(msg => msg.id === normalizedMessage.id);
+        
+        if (existingIndex !== -1) {
+          console.log(`⚠️ Message ${normalizedMessage.id} already exists at index ${existingIndex}, updating it`);
+          
+          // Update existing message (avoid duplicates)
+          const updated = [...prev];
+          updated[existingIndex] = normalizedMessage;
+          
+          // CRITICAL: Deduplicate entire array as safety measure (same ID might appear twice)
+          const uniqueMap = new Map<string, Message>();
+          updated.forEach(msg => {
+            if (msg.id && !uniqueMap.has(msg.id)) {
+              uniqueMap.set(msg.id, msg);
+            }
+          });
+          
+          const uniqueMessages = Array.from(uniqueMap.values());
+          
+          const sorted = uniqueMessages.sort((a, b) => 
+            new Date(a.createdAt || a.sentAt || 0).getTime() - new Date(b.createdAt || b.sentAt || 0).getTime()
+          );
+          
+          console.log(`✅ Updated existing message. Total: ${sorted.length} (was ${prev.length})`);
+          console.log(`   Unique Message IDs: ${sorted.map(m => m.id).join(', ')}`);
+          return sorted;
         }
+        
         // Add new message
-        const updated = [...prev, message].sort((a, b) => 
-          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        const updated = [...prev, normalizedMessage];
+        
+        // CRITICAL: Deduplicate by ID (Map ensures uniqueness)
+        const uniqueMap = new Map<string, Message>();
+        updated.forEach(msg => {
+          if (msg.id && !uniqueMap.has(msg.id)) {
+            uniqueMap.set(msg.id, msg);
+          }
+        });
+        
+        const uniqueMessages = Array.from(uniqueMap.values());
+        
+        // Sort by timestamp
+        const sortedMessages = uniqueMessages.sort((a, b) => 
+          new Date(a.createdAt || a.sentAt || 0).getTime() - new Date(b.createdAt || b.sentAt || 0).getTime()
         );
-        console.log(`✅ Added message to list. Total: ${updated.length}`);
-        return updated;
+        
+        console.log(`✅ Added new message to list. Total: ${sortedMessages.length} (was ${prev.length})`);
+        console.log(`   Unique Message IDs: ${sortedMessages.map(m => m.id).join(', ')}`);
+        return sortedMessages;
       });
       
       // Scroll to bottom
@@ -331,10 +645,25 @@ const ChatDetailScreen: React.FC = () => {
     const messageText = inputText.trim();
     setInputText('');
     
-    // Stop typing indicator
+    // Stop typing indicator when message is sent
     const socket = (chatService as any).socketInstance;
     if (socket?.connected && chatId) {
+      console.log('⌨️ Stopping typing indicator (message sent)');
+      // Emit to all possible chatId formats
       socket.emit('typing', {chatId, isTyping: false});
+      socket.emit('typing', {chatId: chatId.replace(/^chat_/, ''), isTyping: false});
+      socket.emit('typing', {chatId: `chat_${chatId.replace(/^chat_/, '')}`, isTyping: false});
+      isTypingEmittedRef.current = false;
+    }
+    
+    // Clear typing emission timeouts
+    if (typingEmissionTimeoutRef.current) {
+      clearTimeout(typingEmissionTimeoutRef.current);
+      typingEmissionTimeoutRef.current = null;
+    }
+    if (typingStopTimeoutRef.current) {
+      clearTimeout(typingStopTimeoutRef.current);
+      typingStopTimeoutRef.current = null;
     }
 
     // Add message optimistically with pending status
@@ -687,17 +1016,23 @@ const ChatDetailScreen: React.FC = () => {
   };
 
   const getStatusIcon = (status: string) => {
+    // WhatsApp-style status indicators
     switch (status) {
       case 'pending':
       case 'sending':
+        // Clock icon while sending
         return <Icon name="time-outline" size={14} color="#999" />;
       case 'sent':
+        // Single grey tick when sent (server received)
         return <Icon name="checkmark" size={14} color="#999" />;
       case 'delivered':
+        // Double grey tick when delivered (receiver's device received)
         return <Icon name="checkmark-done" size={14} color="#999" />;
       case 'read':
-        return <Icon name="checkmark-done" size={14} color="#4FC3F7" />;
+        // Double BLUE tick when read (receiver has seen the message)
+        return <Icon name="checkmark-done" size={16} color="#4A9EFF" style={{fontWeight: 'bold'}} />;
       default:
+        // Default to clock if status unknown
         return <Icon name="time-outline" size={14} color="#999" />;
     }
   };
@@ -740,24 +1075,29 @@ const ChatDetailScreen: React.FC = () => {
     const isViewOnce = item.isViewOnce && item.readAt;
 
     return (
-      <TouchableOpacity
+      <View
         style={[
-          styles.messageContainer,
-          isMe ? styles.myMessage : styles.theirMessage,
-        ]}
-        onLongPress={() => handleDeleteMessage(item.id)}
-        activeOpacity={0.7}>
+          styles.messageWrapper,
+          isMe ? styles.myMessageWrapper : styles.theirMessageWrapper,
+        ]}>
         {!isMe && otherUserAvatar && (
           <Image source={{uri: otherUserAvatar}} style={styles.messageAvatar} />
         )}
-        
-        <View style={styles.messageContent}>
+        <TouchableOpacity
+          style={[
+            styles.messageContainer,
+            isMe ? styles.myMessage : styles.theirMessage,
+          ]}
+          onLongPress={() => handleDeleteMessage(item.id)}
+          activeOpacity={0.7}>
+          <View style={styles.messageContent}>
           {item.type === 'text' && (
             <Text
               style={[
                 styles.messageText,
                 isMe ? styles.myMessageText : styles.theirMessageText,
-              ]}>
+              ]}
+              selectable>
               {item.content}
             </Text>
           )}
@@ -861,21 +1201,24 @@ const ChatDetailScreen: React.FC = () => {
           </View>
         )}
 
+          </View>
+          
           <View style={styles.messageFooter}>
-            <Text style={styles.messageTime}>
-              {format(new Date(item.createdAt), 'HH:mm')}
+            <Text style={[styles.messageTime, isMe ? styles.myMessageTime : styles.theirMessageTime]}>
+              {format(new Date(item.createdAt || item.sentAt || Date.now()), 'HH:mm')}
             </Text>
+            {/* Status indicators - only show for sent messages (my messages) */}
             {isMe && (
-              <View style={styles.statusIcon}>
-                {getStatusIcon(item.status)}
+              <View style={styles.statusIconContainer}>
+                {getStatusIcon(item.status || 'sent')}
               </View>
             )}
             {item.isViewOnce && !item.readAt && (
-              <Icon name="eye" size={12} color="#999" style={styles.viewOnceIcon} />
+              <Icon name="eye" size={12} color={isMe ? "#075E54" : "#34B7F1"} style={styles.viewOnceIcon} />
             )}
           </View>
-        </View>
-      </TouchableOpacity>
+        </TouchableOpacity>
+      </View>
     );
   };
 
@@ -902,9 +1245,21 @@ const ChatDetailScreen: React.FC = () => {
             )}
           </TouchableOpacity>
           <View style={styles.nameContainer}>
-            <Text style={styles.headerName} numberOfLines={1}>
-              {contactName}
-            </Text>
+            <TouchableOpacity 
+              style={styles.nameRow}
+              onPress={handleEditChatName}
+              onLongPress={handleEditChatName}
+              activeOpacity={0.7}>
+              <Text style={styles.headerName} numberOfLines={1}>
+                {chatName}
+              </Text>
+              <TouchableOpacity 
+                onPress={handleEditChatName}
+                hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}
+                activeOpacity={0.7}>
+                <Icon name="create-outline" size={16} color="#fff" style={styles.editIcon} />
+              </TouchableOpacity>
+            </TouchableOpacity>
             <Text style={styles.headerStatus} numberOfLines={1}>
               {isTyping && typingUser ? `${typingUser} is typing...` : (isAppUser ? 'online' : 'tap to add to contacts')}
             </Text>
@@ -922,7 +1277,22 @@ const ChatDetailScreen: React.FC = () => {
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.headerButton}
-          onPress={() => Alert.alert('Menu', 'More options')}>
+          onPress={() => {
+            Alert.alert(
+              'Chat Options',
+              '',
+              [
+                {
+                  text: 'Edit Chat Name',
+                  onPress: handleEditChatName,
+                },
+                {
+                  text: 'Cancel',
+                  style: 'cancel',
+                },
+              ]
+            );
+          }}>
           <Icon name="ellipsis-vertical" size={24} color="#fff" />
         </TouchableOpacity>
       </View>
@@ -943,7 +1313,9 @@ const ChatDetailScreen: React.FC = () => {
               ref={flatListRef}
               data={messages}
               renderItem={renderMessage}
-              keyExtractor={item => item.id}
+              keyExtractor={(item, index) => item.id || `message-${index}`}
+              extraData={messages}
+              removeClippedSubviews={false}
               contentContainerStyle={styles.messagesList}
               onContentSizeChange={() => {
                 // Scroll to bottom when new messages are added (WhatsApp style)
@@ -1030,11 +1402,121 @@ const ChatDetailScreen: React.FC = () => {
         </View>
       )}
       </KeyboardAvoidingView>
+
+      {/* Edit Chat Name Modal */}
+      {isEditingName && (
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={handleCancelEditName}>
+          <TouchableOpacity
+            style={styles.modalContainer}
+            activeOpacity={1}
+            onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.modalTitle}>Edit Chat Name</Text>
+            <Text style={styles.modalSubtitle}>Enter a name for this chat</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editNameText}
+              onChangeText={setEditNameText}
+              placeholder={contactName}
+              placeholderTextColor="#999"
+              autoFocus
+              maxLength={50}
+              onSubmitEditing={handleSaveChatName}
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalButtonCancel]}
+                onPress={handleCancelEditName}>
+                <Text style={styles.modalButtonTextCancel}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalButtonSave]}
+                onPress={handleSaveChatName}>
+                <Text style={styles.modalButtonTextSave}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      )}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
+  modalOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000,
+  },
+  modalContainer: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 20,
+    width: '85%',
+    maxWidth: 400,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 4},
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 8,
+  },
+  modalSubtitle: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 16,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 16,
+    color: '#333',
+    marginBottom: 20,
+    backgroundColor: '#f9f9f9',
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+  },
+  modalButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    minWidth: 80,
+    alignItems: 'center',
+  },
+  modalButtonCancel: {
+    backgroundColor: '#f0f0f0',
+  },
+  modalButtonSave: {
+    backgroundColor: '#075E54',
+  },
+  modalButtonTextCancel: {
+    color: '#333',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  modalButtonTextSave: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
   container: {
     flex: 1,
     backgroundColor: '#ECE5DD',
@@ -1078,29 +1560,57 @@ const styles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
-    marginRight: 6,
-    marginBottom: 2,
+    marginRight: 8,
+    alignSelf: 'flex-end', // Align avatar to bottom of message
     backgroundColor: '#ddd',
   },
   messageContent: {
-    flex: 1,
+    // Remove flex: 1 to allow content to wrap naturally
+    width: '100%',
   },
   messageFooter: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'flex-end',
     marginTop: 4,
-    alignSelf: 'flex-end',
+    paddingTop: 2, // Small padding to separate from content
+    gap: 4, // Space between time and status icon
   },
   statusIcon: {
     marginLeft: 4,
   },
+  statusIconContainer: {
+    marginLeft: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    minWidth: 16, // Ensure icon has space
+    height: 16, // Match icon size
+  },
+  myMessageTime: {
+    fontSize: 11,
+    color: '#667781', // WhatsApp grey for sent messages
+  },
+  theirMessageTime: {
+    fontSize: 11,
+    color: '#667781', // Same grey for received messages
+  },
   nameContainer: {
     flex: 1,
+    marginLeft: 5,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   headerName: {
     fontSize: 16,
     fontWeight: '600',
     color: '#fff',
+    flex: 1,
+  },
+  editIcon: {
+    opacity: 0.7,
   },
   headerStatus: {
     fontSize: 13,
@@ -1118,25 +1628,57 @@ const styles = StyleSheet.create({
   messagesList: {
     padding: 15,
   },
+  messageWrapper: {
+    width: '100%',
+    marginBottom: 4,
+    paddingHorizontal: 4,
+  },
+  myMessageWrapper: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+  },
+  theirMessageWrapper: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+  },
   messageContainer: {
     maxWidth: '75%',
-    marginBottom: 10,
-    padding: 12,
-    borderRadius: 16,
+    minWidth: 60, // Minimum width for small messages
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    overflow: 'hidden', // Prevent content overflow
   },
   myMessage: {
-    alignSelf: 'flex-end',
-    backgroundColor: '#DCF8C6',
-    borderTopRightRadius: 0,
+    backgroundColor: '#DCF8C6', // WhatsApp green for sent messages
+    borderTopRightRadius: 4,
+    borderBottomRightRadius: 4,
+    borderBottomLeftRadius: 8,
+    borderTopLeftRadius: 8,
+    elevation: 1,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 1},
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
   },
   theirMessage: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 0,
+    backgroundColor: '#fff', // White for received messages
+    borderTopLeftRadius: 4,
+    borderBottomLeftRadius: 4,
+    borderBottomRightRadius: 8,
+    borderTopRightRadius: 8,
+    elevation: 1,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 1},
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
   },
   messageText: {
     fontSize: 16,
     lineHeight: 20,
+    marginBottom: 0, // Remove any extra margin
   },
   myMessageText: {
     color: '#000',
@@ -1147,14 +1689,14 @@ const styles = StyleSheet.create({
   messageImage: {
     width: 200,
     height: 200,
-    borderRadius: 12,
-    marginBottom: 5,
+    borderRadius: 8,
+    marginBottom: 0, // No margin between image and footer
   },
   videoContainer: {
     width: 200,
     height: 200,
-    borderRadius: 12,
-    marginBottom: 5,
+    borderRadius: 8,
+    marginBottom: 0, // No margin between video and footer
     position: 'relative',
     overflow: 'hidden',
   },
@@ -1232,9 +1774,7 @@ const styles = StyleSheet.create({
   },
   messageTime: {
     fontSize: 11,
-    color: '#999',
-    marginTop: 5,
-    alignSelf: 'flex-end',
+    color: '#667781',
   },
   viewOnceIcon: {
     marginLeft: 5,

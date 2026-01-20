@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback} from 'react';
+import React, {useState, useEffect, useCallback, useRef} from 'react';
 import {
   View,
   Text,
@@ -19,16 +19,20 @@ const ChatsScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
+  // Track typing status per chat
+  const [typingStatus, setTypingStatus] = useState<{[chatId: string]: {isTyping: boolean; typingUser: string}}>({});
 
   // Load chats when screen is focused (like WhatsApp)
   useFocusEffect(
     useCallback(() => {
+      console.log('📱 ChatsScreen: Screen focused, loading chats...');
+      
       // Connect chat service to receive messages
       chatService.connect().then(() => {
-        console.log('Chat service connected in ChatsScreen');
+        console.log('✅ Chat service connected in ChatsScreen');
         loadChats();
       }).catch((error) => {
-        console.error('Failed to connect chat service:', error);
+        console.error('❌ Failed to connect chat service:', error);
         // Still load chats even if connection fails
         loadChats();
         // Retry connection
@@ -38,13 +42,142 @@ const ChatsScreen: React.FC = () => {
       });
       
       // Listen for new messages to update chat list
-      const unsubscribe = chatService.onMessage(() => {
-        // Reload chats when new message arrives
-        loadChats();
+      const messageUnsubscribe = chatService.onMessage(async (message: Message) => {
+        console.log('📨 ChatsScreen: New message received, reloading chats...', {
+          messageId: message.id,
+          chatId: message.chatId,
+          senderId: message.senderId,
+        });
+        // Reload chats when new message arrives (chat will be created/updated)
+        await loadChats();
       });
       
+      // Listen for chat updates (when chat is created/updated)
+      const chatUnsubscribe = chatService.onChatUpdate(async (chat: Chat) => {
+        console.log('📨 ChatsScreen: Chat updated, reloading chats...', {
+          chatId: chat.id,
+        });
+        // Reload chats when chat is updated
+        await loadChats();
+      });
+
+      // Listen for typing indicators
+      const setupTypingListener = () => {
+        const socket = (chatService as any).socketInstance;
+        if (!socket) {
+          console.log('⚠️ Socket not ready for typing listener, will retry');
+          return () => {};
+        }
+        
+        const handleTyping = async (data: {deviceId: string; deviceName: string; chatId: string; isTyping: boolean}) => {
+          console.log('⌨️ ChatsScreen: Typing event received:', data);
+          
+          // Get current device ID to ignore own typing
+          const {deviceService} = await import('../../services/DeviceService');
+          const currentDevice = await deviceService.getDeviceInfo();
+          
+          // Ignore typing from self
+          if (data.deviceId === currentDevice.deviceId) {
+            console.log('⌨️ Ignoring own typing indicator');
+            return;
+          }
+          
+          const normalizedChatId = data.chatId?.replace(/^chat_/, '') || data.chatId;
+          const chatWithPrefix = data.chatId.startsWith('chat_') ? data.chatId : `chat_${normalizedChatId}`;
+          
+          // Update typing status for all possible chatId formats
+          setTypingStatus(prev => {
+            const updated = {...prev};
+            
+            if (data.isTyping) {
+              updated[data.chatId] = {isTyping: true, typingUser: data.deviceName};
+              updated[normalizedChatId] = {isTyping: true, typingUser: data.deviceName};
+              updated[chatWithPrefix] = {isTyping: true, typingUser: data.deviceName};
+              
+              console.log(`⌨️ Setting typing status for chat: ${data.chatId} (${data.deviceName} is typing)`);
+              
+              // Auto-hide typing after 3 seconds
+              setTimeout(() => {
+                setTypingStatus(current => {
+                  const cleared = {...current};
+                  delete cleared[data.chatId];
+                  delete cleared[normalizedChatId];
+                  delete cleared[chatWithPrefix];
+                  console.log(`⌨️ Auto-hiding typing for chat: ${data.chatId} (3s timeout)`);
+                  return cleared;
+                });
+                // Refresh chats to update UI
+                loadChats();
+              }, 3000);
+            } else {
+              // Stop typing
+              delete updated[data.chatId];
+              delete updated[normalizedChatId];
+              delete updated[chatWithPrefix];
+              console.log(`⌨️ Stopped typing for chat: ${data.chatId}`);
+            }
+            
+            return updated;
+          });
+          
+          // Update chats state to reflect typing status
+          setChats(prev => prev.map(chat => {
+            const chatNormalizedId = chat.id.replace(/^chat_/, '');
+            const dataNormalizedId = data.chatId.replace(/^chat_/, '');
+            
+            // Check if this typing event is for this chat
+            const matchesChatId = chat.id === data.chatId || 
+                                 chat.id === dataNormalizedId ||
+                                 chatNormalizedId === dataNormalizedId ||
+                                 chatNormalizedId === data.chatId ||
+                                 (data.chatId.startsWith('chat_') && chatNormalizedId === dataNormalizedId);
+            
+            if (matchesChatId) {
+              console.log(`⌨️ Updating chat ${chat.id} typing status: ${data.isTyping ? 'typing' : 'stopped'}`);
+              return {
+                ...chat,
+                isTyping: data.isTyping,
+                typingUser: data.isTyping ? data.deviceName : undefined,
+              };
+            }
+            return chat;
+          }));
+        };
+        
+        socket.on('user_typing', handleTyping);
+        console.log('✅ Typing listener set up in ChatsScreen');
+        
+        return () => {
+          socket.off('user_typing', handleTyping);
+        };
+      };
+      
+      // Setup typing listener after socket is connected (with delay to ensure socket is ready)
+      let typingUnsubscribe: (() => void) | null = null;
+      let typingSetupTimeout: NodeJS.Timeout | null = null;
+      
+      // Try to setup typing listener immediately
+      typingUnsubscribe = setupTypingListener();
+      
+      // Also try again after delay if socket wasn't ready
+      typingSetupTimeout = setTimeout(() => {
+        if (!typingUnsubscribe) {
+          typingUnsubscribe = setupTypingListener();
+        }
+      }, 1000);
+      
+      // Also set up a periodic refresh (every 2 seconds) to catch any missed updates
+      const refreshInterval = setInterval(() => {
+        console.log('🔄 ChatsScreen: Periodic refresh...');
+        loadChats();
+      }, 2000);
+      
       return () => {
-        unsubscribe();
+        if (messageUnsubscribe) messageUnsubscribe();
+        if (chatUnsubscribe) chatUnsubscribe();
+        if (typingUnsubscribe) typingUnsubscribe();
+        if (typingSetupTimeout) clearTimeout(typingSetupTimeout);
+        if (refreshInterval) clearInterval(refreshInterval);
       };
     }, [])
   );
@@ -52,10 +185,22 @@ const ChatsScreen: React.FC = () => {
   const loadChats = async () => {
     try {
       setLoading(true);
+      console.log('📥 Loading chats from storage...');
       const loadedChats = await chatStorageService.getChats();
+      console.log(`✅ Loaded ${loadedChats.length} chat(s) from storage`);
+      
+      // Log chat details for debugging
+      if (loadedChats.length > 0) {
+        loadedChats.forEach((chat, index) => {
+          console.log(`   Chat ${index + 1}: ${chat.id} - ${chat.otherUser?.name || 'Unknown'} (last message: ${chat.lastMessage?.content?.substring(0, 30) || 'none'})`);
+        });
+      } else {
+        console.log('⚠️ No chats found in storage');
+      }
+      
       setChats(loadedChats);
     } catch (error) {
-      console.error('Error loading chats:', error);
+      console.error('❌ Error loading chats:', error);
     } finally {
       setLoading(false);
     }
@@ -68,6 +213,12 @@ const ChatsScreen: React.FC = () => {
     
     const contactName = item.otherUser?.name || 'Unknown User';
     const contactAvatar = item.otherUser?.avatar;
+    
+    // Check typing status (from state or chat item)
+    const normalizedChatId = item.id.replace(/^chat_/, '');
+    const chatTypingStatus = typingStatus[item.id] || typingStatus[normalizedChatId] || typingStatus[`chat_${normalizedChatId}`];
+    const isSomeoneTyping = item.isTyping || chatTypingStatus?.isTyping || false;
+    const typingUserName = item.typingUser || chatTypingStatus?.typingUser || contactName;
 
     return (
       <TouchableOpacity
@@ -98,11 +249,32 @@ const ChatsScreen: React.FC = () => {
         <View style={styles.chatInfo}>
           <View style={styles.chatHeader}>
             <Text style={styles.chatName}>{contactName}</Text>
-            {lastMessageTime && (
+            {lastMessageTime && !isSomeoneTyping && (
               <Text style={styles.chatTime}>{lastMessageTime}</Text>
             )}
+            {isSomeoneTyping && (
+              <View style={styles.typingIndicatorContainer}>
+                <View style={styles.typingDots}>
+                  <View style={[styles.typingDot, styles.typingDot1]} />
+                  <View style={[styles.typingDot, styles.typingDot2]} />
+                  <View style={[styles.typingDot, styles.typingDot3]} />
+                </View>
+              </View>
+            )}
           </View>
-          {item.lastMessage && (
+          {isSomeoneTyping ? (
+            <View style={styles.typingContainer}>
+              <Text 
+                style={[
+                  styles.lastMessage,
+                  styles.typingMessage
+                ]} 
+                numberOfLines={1}>
+                <Text style={styles.typingUserName}>{typingUserName}</Text>
+                {' is typing...'}
+              </Text>
+            </View>
+          ) : item.lastMessage ? (
             <Text 
               style={[
                 styles.lastMessage,
@@ -121,7 +293,7 @@ const ChatsScreen: React.FC = () => {
                 ? '📄 Document'
                 : `📎 ${item.lastMessage.type}`}
             </Text>
-          )}
+          ) : null}
         </View>
       </TouchableOpacity>
     );
@@ -260,6 +432,41 @@ const styles = StyleSheet.create({
   unreadLastMessage: {
     fontWeight: '600',
     color: '#333',
+  },
+  typingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  typingMessage: {
+    fontStyle: 'italic',
+    color: '#999',
+  },
+  typingUserName: {
+    fontWeight: '600',
+    color: '#666',
+  },
+  typingIndicatorContainer: {
+    marginLeft: 8,
+  },
+  typingDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  typingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#999',
+  },
+  typingDot1: {
+    opacity: 1,
+  },
+  typingDot2: {
+    opacity: 0.6,
+  },
+  typingDot3: {
+    opacity: 0.3,
   },
   emptyContainer: {
     flex: 1,

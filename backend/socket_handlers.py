@@ -474,7 +474,7 @@ def register_socket_handlers(socketio_instance):
     
     @socketio_instance.on('typing')
     def handle_typing(data):
-        """Handle typing indicator"""
+        """Handle typing indicator - broadcasts to all possible rooms for reliability"""
         try:
             from flask import request
             session_data = device_sessions.get(request.sid, {})
@@ -484,23 +484,74 @@ def register_socket_handlers(socketio_instance):
             is_typing = data.get('isTyping', False)
             
             if not device_id or not chat_id:
+                print(f"⚠️ Typing event missing device_id or chat_id")
                 return
             
-            # Verify device is part of chat
-            chat = Chat.objects(id=chat_id).first()
-            if not chat or (chat.user1_id != device_id and chat.user2_id != device_id):
-                return
+            print(f"⌨️ Typing event: device={device_id}, chat={chat_id}, typing={is_typing}")
             
-            # Emit to other devices in chat
-            socketio_instance.emit('user_typing', {
+            # Normalize chatId (handle both with/without prefix)
+            chat_id_str = str(chat_id)
+            clean_chat_id = chat_id_str.replace('chat_', '') if chat_id_str.startswith('chat_') else chat_id_str
+            
+            # Try to get chat info (optional - typing works even if chat doesn't exist in DB yet)
+            receiver_id = None
+            try:
+                # Try multiple chatId formats to find chat
+                chat = Chat.objects(id=clean_chat_id).first()
+                if not chat and chat_id_str.startswith('chat_'):
+                    chat = Chat.objects(id=chat_id_str).first()
+                if not chat:
+                    chat = Chat.objects(id=f'chat_{clean_chat_id}').first()
+                
+                if chat:
+                    # Get receiver device ID
+                    receiver_id = chat.user2_id if chat.user1_id == device_id else chat.user1_id
+                    print(f"📋 Found chat, receiver_id: {receiver_id}")
+                else:
+                    print(f"📋 Chat not found in DB (may not exist yet), will broadcast to all rooms")
+            except Exception as e:
+                print(f"⚠️ Could not fetch chat for typing: {e}")
+                receiver_id = None
+            
+            # Typing data to emit
+            typing_data = {
                 'deviceId': device_id,
                 'deviceName': device_name,
-                'chatId': chat_id,
+                'chatId': chat_id_str,  # Use original chatId format
                 'isTyping': is_typing
-            }, room=f'chat_{chat_id}', include_self=False)
+            }
+            
+            print(f"⌨️ Broadcasting typing event: {device_name} {'typing' if is_typing else 'stopped'} in chat {chat_id_str}")
+            
+            # CRITICAL: Emit to ALL possible rooms to ensure delivery (same as messages)
+            # 1. Chat room (primary) - try multiple formats
+            socketio_instance.emit('user_typing', typing_data, room=f'chat_{clean_chat_id}', include_self=False)
+            if chat_id_str != f'chat_{clean_chat_id}':
+                socketio_instance.emit('user_typing', typing_data, room=f'chat_{chat_id_str}', include_self=False)
+            
+            # 2. Receiver's device room (if we know it)
+            if receiver_id:
+                socketio_instance.emit('user_typing', typing_data, room=f'device_{receiver_id}', include_self=False)
+                print(f"✅ Emitted typing to receiver device room: device_{receiver_id}")
+            
+            # 3. Also broadcast to all active device sessions (for device-based chats)
+            # This ensures typing works even if chat doesn't exist in DB
+            emitted_count = 0
+            for sid, session_info in device_sessions.items():
+                if sid != request.sid:  # Not the sender
+                    session_device_id = session_info.get('device_id')
+                    if session_device_id and session_device_id != device_id:
+                        # Emit to this device's room
+                        socketio_instance.emit('user_typing', typing_data, room=f'device_{session_device_id}', include_self=False, skip_sid=request.sid)
+                        emitted_count += 1
+            
+            print(f"✅ Typing indicator broadcasted to {emitted_count} device room(s) and chat room(s)")
+            print(f"✅ Typing event: {device_name} {'typing' if is_typing else 'stopped'} in chat {chat_id_str}")
             
         except Exception as e:
-            print(f"Typing error: {e}")
+            print(f"❌ Typing error: {e}")
+            import traceback
+            traceback.print_exc()
     
     @socketio_instance.on('mark_read')
     def handle_mark_read(data):

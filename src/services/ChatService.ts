@@ -215,11 +215,52 @@ class ChatService {
         await messageStorageService.saveMessage(message);
         console.log('✅ Message saved locally');
 
-        // Update chat with new message
+        // Update chat with new message - CRITICAL: Creates chat if doesn't exist
         try {
           const {chatStorageService} = await import('./ChatStorageService');
-          await chatStorageService.updateChatWithMessage(message.chatId, message);
-          console.log('✅ Chat updated with new message');
+          
+          // Normalize chatId for chat creation
+          const normalizedChatId = message.chatId?.startsWith('chat_') 
+            ? message.chatId 
+            : `chat_${message.chatId}`;
+          
+          // Ensure message has proper status
+          const messageWithStatus = {
+            ...message,
+            status: message.status || 'delivered', // Default to delivered for received messages
+          };
+          
+          await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, true);
+          console.log('✅ Chat updated/created with new message:', normalizedChatId, 'status:', messageWithStatus.status);
+          
+          // Notify chat listeners that chat was updated - CRITICAL: This updates chat list on both sides
+          this.chatListeners.forEach((listener, index) => {
+            try {
+              // Get the updated chat from storage
+              chatStorageService.getChats().then(chats => {
+                const updatedChat = chats.find(c => {
+                  const normalizedChatId = c.id?.replace(/^chat_/, '') || '';
+                  const normalizedMessageChatId = normalizedChatId.replace(/^chat_/, '');
+                  return normalizedChatId === normalizedMessageChatId || c.id === normalizedChatId;
+                });
+                
+                if (updatedChat) {
+                  listener(updatedChat);
+                  console.log(`✅ Chat listener ${index} notified with updated chat`);
+                } else {
+                  // Chat might not exist yet, notify anyway to trigger refresh
+                  listener({} as Chat);
+                  console.log(`✅ Chat listener ${index} notified (chat will be created)`);
+                }
+              }).catch(err => {
+                console.error(`❌ Error getting chat for listener ${index}:`, err);
+                // Still notify to trigger refresh
+                listener({} as Chat);
+              });
+            } catch (error) {
+              console.error(`❌ Chat listener ${index} error:`, error);
+            }
+          });
         } catch (error: any) {
           console.error('❌ Error updating chat:', error);
         }

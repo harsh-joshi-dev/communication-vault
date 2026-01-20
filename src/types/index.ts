@@ -81,6 +81,9 @@ export interface Chat {
   isBlocked: boolean;
   createdAt: string;
   updatedAt: string;
+  // Typing indicator
+  isTyping?: boolean;
+  typingUser?: string;
 }
 
 export interface Contact {
