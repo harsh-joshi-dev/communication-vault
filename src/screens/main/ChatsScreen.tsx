@@ -27,18 +27,13 @@ const ChatsScreen: React.FC = () => {
   // Subscribe to new messages and chat updates ONCE on mount; stay subscribed until unmount
   // so chat list updates even when we're on ChatDetail or app was in background
   useEffect(() => {
-    const unM = chatService.onMessage(() => {
-      console.log('📨 ChatsScreen: New message, reloading chats');
+    const unM = chatService.onMessage(() => { loadChats(true); });
+    const unC = chatService.onChatUpdate(() => { loadChats(true); });
+    const unD = chatService.onChatDeletedForEveryone((id) => {
+      chatStorageService.deleteChat(id).catch(() => {});
       loadChats(true);
     });
-    const unC = chatService.onChatUpdate(() => {
-      console.log('📨 ChatsScreen: Chat updated, reloading chats');
-      loadChats(true);
-    });
-    return () => {
-      unM();
-      unC();
-    };
+    return () => { unM(); unC(); unD(); };
   }, []);
 
   // When app comes to foreground, refresh chat list (in case we missed events while backgrounded)
@@ -56,11 +51,7 @@ const ChatsScreen: React.FC = () => {
   useFocusEffect(
     useCallback(() => {
       console.log('📱 ChatsScreen: Screen focused, loading chats...');
-      chatService.connect().then(() => {
-        console.log('✅ Chat service connected in ChatsScreen');
-        loadChats();
-      }).catch((error) => {
-        console.error('❌ Failed to connect chat service:', error);
+      chatService.connect().then(() => { loadChats(); }).catch(() => {
         loadChats();
         setTimeout(() => chatService.connect().catch(() => {}), 3000);
       });
@@ -183,20 +174,11 @@ const ChatsScreen: React.FC = () => {
   const loadChats = async (silent?: boolean) => {
     try {
       if (!silent) setLoading(true);
-      console.log('📥 Loading chats from storage...');
       const loadedChats = await chatStorageService.getChats();
-      console.log(`✅ Loaded ${loadedChats.length} chat(s) from storage`);
-      
-      // Log chat details for debugging
-      if (loadedChats.length > 0) {
-        loadedChats.forEach((chat, index) => {
-          console.log(`   Chat ${index + 1}: ${chat.id} - ${chat.otherUser?.name || 'Unknown'} (last message: ${chat.lastMessage?.content?.substring(0, 30) || 'none'})`);
-        });
-      } else {
-        console.log('⚠️ No chats found in storage');
-      }
-      
       setChats(loadedChats);
+      if (loadedChats.length === 0) {
+        setTimeout(() => { chatStorageService.getChats().then(c => { if (c.length > 0) setChats(c); }); }, 400);
+      }
     } catch (error) {
       console.error('❌ Error loading chats:', error);
     } finally {

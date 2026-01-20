@@ -81,40 +81,38 @@ const ChatDetailScreen: React.FC = () => {
   }, [messages]);
 
   useEffect(() => {
-    // Get current device ID
+    const unDeleted = chatService.onChatDeletedForEveryone((deletedId: string) => {
+      const n = (s: string) => (s || '').replace(/^chat_/, '');
+      if (n(deletedId) === n(chatId)) {
+        chatStorageService.deleteChat(chatId).catch(() => {});
+        chatService.notifyChatListRefresh();
+        navigation.goBack();
+      }
+    });
+    return () => { unDeleted(); };
+  }, [chatId]);
+
+  useEffect(() => {
     deviceService.getDeviceId().then(id => setCurrentDeviceId(id));
-    
-    // Load messages immediately when screen opens (like WhatsApp)
     loadMessages();
-    
-    // Setup message listener FIRST (before connecting) so we don't miss messages
     const messageUnsubscribe = setupMessageListener();
-    
-    // Connect chat service with device ID
+
     chatService.connect().then(() => {
-      console.log('✅ Chat service connected successfully');
-      // After connection, setup other listeners and join chat
       setupTypingListener();
       setupStatusUpdateListener();
       joinChat();
-      
-      // Reload messages after connection to get any new ones
       loadMessages();
-    }).catch((error) => {
-      console.error('❌ Failed to connect chat service:', error);
-      // Still show old messages even if connection fails
-      // Retry connection after a delay
+    }).catch(() => {
       setTimeout(() => {
         chatService.connect().then(() => {
           setupTypingListener();
           setupStatusUpdateListener();
           joinChat();
           loadMessages();
-        }).catch(err => console.error('Retry connection failed:', err));
+        }).catch(() => {});
       }, 3000);
     });
-    
-    // Mark chat as read when opening
+
     chatStorageService.markChatAsRead(chatId);
 
     return () => {
@@ -428,6 +426,35 @@ const ChatDetailScreen: React.FC = () => {
         },
       ]
     );
+  };
+
+  const handleDeleteChatForMeOnly = async () => {
+    try {
+      await chatStorageService.deleteChat(chatId);
+      chatService.notifyChatListRefresh();
+      navigation.goBack();
+    } catch (e) {
+      Alert.alert('Error', 'Failed to delete chat');
+    }
+  };
+
+  const handleDeleteChatForEveryone = async () => {
+    try {
+      await chatStorageService.deleteChat(chatId);
+      chatService.deleteChatForEveryone(chatId, receiverId ?? undefined, receiverUniqueCode);
+      chatService.notifyChatListRefresh();
+      navigation.goBack();
+    } catch (e) {
+      Alert.alert('Error', 'Failed to delete chat');
+    }
+  };
+
+  const handleDeleteChat = () => {
+    Alert.alert('Delete Chat', 'Remove this chat?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete for me only', onPress: handleDeleteChatForMeOnly },
+      { text: 'Delete for everyone (both ends)', style: 'destructive', onPress: handleDeleteChatForEveryone },
+    ]);
   };
 
   // Normalize chatId (remove or add 'chat_' prefix for consistency)
@@ -1273,7 +1300,8 @@ const ChatDetailScreen: React.FC = () => {
               '',
               [
                 { text: 'Edit Chat Name', onPress: handleEditChatName },
-                { text: 'Clear Chat History', onPress: handleClearChatHistory, style: 'destructive' },
+                { text: 'Clear Chat History', onPress: handleClearChatHistory },
+                { text: 'Delete Chat', onPress: handleDeleteChat, style: 'destructive' },
                 { text: 'Cancel', style: 'cancel' },
               ]
             );

@@ -25,6 +25,8 @@ class ChatService {
     deliveredAt?: string;
     readAt?: string;
   }) => void)[] = [];
+  private deletedChatIdListeners: ((chatId: string) => void)[] = [];
+  private recentNewMessageIds: Set<string> = new Set();
 
   get socketInstance(): Socket | null {
     return this.socket;
@@ -67,11 +69,11 @@ class ChatService {
           },
           transports: ['polling', 'websocket'],
           reconnection: true,
-          reconnectionAttempts: Infinity, // Keep trying forever
-          reconnectionDelay: 2000,
-          reconnectionDelayMax: 10000,
-          timeout: 60000, // 60 seconds for Render cold starts
-          forceNew: false, // Reuse connection if possible
+          reconnectionAttempts: Infinity,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 8000,
+          timeout: 45000,
+          forceNew: false,
         });
 
         let authReceived = false;
@@ -109,29 +111,12 @@ class ChatService {
           resolve();
         });
 
-        // Connection errors
-        this.socket.on('connect_error', (error: any) => {
-          console.error('❌ Connection error:', error.message);
+        this.socket.on('connect_error', () => {
           this.isAuthenticated = false;
-          
-          // Don't reject immediately - let reconnection handle it
-          // Only reject after a very long timeout (for Render cold starts)
-          if (!authReceived) {
-            setTimeout(() => {
-              if (!this.isAuthenticated && !authReceived && this.connectionPromise) {
-                // Still trying to connect, don't reject yet
-                console.log('⏳ Still attempting to connect...');
-              }
-            }, 10000);
-          }
         });
 
-        // Disconnect handler
-        this.socket.on('disconnect', (reason) => {
-          console.log('⚠️ Disconnected:', reason);
+        this.socket.on('disconnect', (reason: string) => {
           this.isAuthenticated = false;
-          
-          // Auto-reconnect will handle it, but reset auth
           if (reason === 'io server disconnect') {
             this.socket?.connect();
           }
@@ -140,20 +125,16 @@ class ChatService {
         // Set up event listeners
         this.setupEventListeners();
 
-        // Timeout after 90 seconds if no auth (for Render cold starts)
         setTimeout(() => {
           if (!this.isAuthenticated && !authReceived && this.connectionPromise) {
-            console.error('❌ Authentication timeout after 90 seconds');
-            // Don't reject - let it keep trying in background
-            // Just resolve so app can continue
             this.connectionPromise = null;
-            resolve(); // Resolve anyway so app doesn't hang
+            resolve();
           }
-        }, 90000);
+        }, 60000);
 
-      } catch (error: any) {
+      } catch {
         this.connectionPromise = null;
-        reject(error);
+        resolve();
       }
     });
 
@@ -163,11 +144,19 @@ class ChatService {
   private setupEventListeners(): void {
     if (!this.socket) return;
 
-    // New message received - CRITICAL: This must work for messages to appear
+    // New message received - dedupe when backend emits to both code_ and device_ (receiver gets 2x)
     this.socket.on('new_message', async (messageData: any) => {
+      const rawId = messageData?.id || messageData?._id;
+      if (rawId && this.recentNewMessageIds.has(rawId)) {
+        return;
+      }
+      if (rawId) {
+        this.recentNewMessageIds.add(rawId);
+        setTimeout(() => { this.recentNewMessageIds.delete(rawId); }, 6000);
+      }
       try {
         console.log('📥 📥 📥 RECEIVED NEW MESSAGE!', {
-          id: messageData.id || messageData._id,
+          id: rawId,
           chatId: messageData.chatId || messageData.chat_id,
           senderId: messageData.senderId || messageData.sender_id,
           receiverId: messageData.receiverId || messageData.receiver_id,
@@ -288,6 +277,11 @@ class ChatService {
       };
       this.chatListeners.forEach(listener => listener(chat));
     });
+
+    this.socket.on('chat_deleted_for_everyone', (data: any) => {
+      const id = (data?.chatId || '').toString();
+      if (id) this.deletedChatIdListeners.forEach(l => { try { l(id); } catch (_) {} });
+    });
   }
 
   async disconnect(): Promise<void> {
@@ -316,6 +310,17 @@ class ChatService {
   /** Notify chat list to refresh (e.g. after clear history) */
   notifyChatListRefresh(): void {
     this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
+  }
+
+  onChatDeletedForEveryone(listener: (chatId: string) => void): () => void {
+    this.deletedChatIdListeners.push(listener);
+    return () => { this.deletedChatIdListeners = this.deletedChatIdListeners.filter(l => l !== listener); };
+  }
+
+  deleteChatForEveryone(chatId: string, receiverId?: string, receiverUniqueCode?: string): void {
+    if (this.socket?.connected && this.isAuthenticated) {
+      this.socket.emit('delete_chat_for_everyone', { chatId, receiverId: receiverId || '', receiverUniqueCode: receiverUniqueCode || '' });
+    }
   }
 
   onMessageStatusUpdate(listener: (update: {

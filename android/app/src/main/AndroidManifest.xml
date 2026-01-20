@@ -31,15 +31,10 @@
             android:windowSoftInputMode="adjustResize"
             android:exported="true"
             android:enabled="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
+            <!-- No MAIN/LAUNCHER here: only activity-aliases (e.g. .default) provide the launcher icon to avoid 2 icons -->
         </activity>
-        
-        <!-- Activity Aliases for different app icons and names -->
-        <!-- Note: Icon resources need to be added to mipmap folders -->
-        <!-- For now, using default icon - add custom icons to mipmap folders -->
+
+        <!-- Activity Aliases: exactly one has LAUNCHER and enabled=true (default); others are for disguise and enabled=false -->
         <activity-alias
             android:name=".MainActivity.default"
             android:targetActivity=".MainActivity"

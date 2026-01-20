@@ -11,31 +11,29 @@ class ChatStorageService {
   private static MESSAGES_KEY_PREFIX = 'chat_messages_';
 
   /**
-   * Get all chats. Retries once if empty (guards against flaky reads/races).
+   * Get all chats. Retries when empty to handle races with concurrent save and EncryptedStorage timing.
    */
   async getChats(): Promise<Chat[]> {
     const doGet = async (): Promise<Chat[]> => {
       const chatsJson = await EncryptedStorage.getItem(CHATS_STORAGE_KEY);
-      if (!chatsJson || chatsJson === '') {
+      if (!chatsJson || chatsJson === '') return [];
+      try {
+        const chats = JSON.parse(chatsJson);
+        return Array.isArray(chats) ? chats : [];
+      } catch {
         return [];
       }
-      const chats = JSON.parse(chatsJson);
-      if (!Array.isArray(chats)) {
-        console.error('❌ Chats data is not an array:', typeof chats);
-        return [];
-      }
-      return chats;
     };
 
     try {
       let chats = await doGet();
-      if (chats.length === 0) {
-        // Retry once after a short delay (guards against race with concurrent save)
-        await new Promise(r => setTimeout(r, 80));
+      const delays = [80, 150, 250];
+      for (const d of delays) {
+        if (chats.length > 0) break;
+        await new Promise(r => setTimeout(r, d));
         chats = await doGet();
       }
       if (chats.length === 0) {
-        console.log('📭 No chats in storage (key empty or missing)');
         return [];
       }
 
@@ -103,22 +101,29 @@ class ChatStorageService {
   }
 
   /**
-   * Save chats
+   * Save chats. Verifies after write; retries once if verification fails (handles EncryptedStorage timing).
    */
   private async saveChats(chats: Chat[]): Promise<void> {
-    try {
-      console.log(`💾 Saving ${chats.length} chat(s) to storage...`);
+    const doSave = async (): Promise<boolean> => {
       const chatsJson = JSON.stringify(chats);
       await EncryptedStorage.setItem(CHATS_STORAGE_KEY, chatsJson);
-      console.log(`✅ Successfully saved ${chats.length} chat(s) to storage`);
-      
-      // Verify save worked
       const verify = await EncryptedStorage.getItem(CHATS_STORAGE_KEY);
-      if (verify) {
-        const verified = JSON.parse(verify);
-        console.log(`✅ Verified: ${verified.length} chat(s) in storage`);
-      } else {
-        console.error('❌ Verification failed: No chats found after save!');
+      if (!verify) return false;
+      try {
+        const v = JSON.parse(verify);
+        return Array.isArray(v) && (chats.length === 0 || v.length > 0);
+      } catch {
+        return false;
+      }
+    };
+    try {
+      let ok = await doSave();
+      if (!ok && chats.length > 0) {
+        await new Promise(r => setTimeout(r, 120));
+        ok = await doSave();
+      }
+      if (!ok && chats.length > 0) {
+        console.warn('⚠️ saveChats: verification failed after retry');
       }
     } catch (error) {
       console.error('❌ Error saving chats:', error);
@@ -407,18 +412,22 @@ class ChatStorageService {
   }
 
   /**
-   * Delete chat
+   * Delete chat (removes from list and clears all message keys for this chat)
    */
   async deleteChat(chatId: string): Promise<void> {
     try {
+      const {messageStorageService} = await import('./MessageStorageService');
+      await messageStorageService.clearMessages(chatId);
       const chats = await this.getChats();
-      const filteredChats = chats.filter(chat => chat.id !== chatId);
+      const normalized = (id: string) => (id || '').replace(/^chat_/, '');
+      const base = normalized(chatId);
+      const filteredChats = chats.filter(
+        c => normalized(c.id || '') !== base && c.id !== chatId
+      );
       await this.saveChats(filteredChats);
-      
-      // Also delete messages for this chat
-      await EncryptedStorage.removeItem(`${ChatStorageService.MESSAGES_KEY_PREFIX}${chatId}`);
     } catch (error) {
       console.error('Error deleting chat:', error);
+      throw error;
     }
   }
 }

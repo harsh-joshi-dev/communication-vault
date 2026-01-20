@@ -356,20 +356,18 @@ def register_socket_handlers(socketio_instance):
             socketio_instance.emit('new_message', message_dict, room=f'chat_{chat_id_str}')
             print(f"   ✅ [1/6] Emitted to chat room: chat_{chat_id_str}")
             
-            # 2. Emit to receiver's code room (use exact room they joined; fallback to code_{receiver_unique_code})
-            if receiver_code_room:
+            # 2. Emit to receiver ONCE: prefer device_ when we have it, else code_ (avoids duplicate delivery)
+            if receiver_actual_device_id:
+                socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_actual_device_id}')
+                print(f"📤 [2] Emitted to device room: device_{receiver_actual_device_id}")
+            elif receiver_code_room:
                 socketio_instance.emit('new_message', message_dict, room=receiver_code_room)
-                print(f"📤 [2] ⭐ Emitted to code room: {receiver_code_room} (RECEIVER IS HERE)")
+                print(f"📤 [2] Emitted to code room: {receiver_code_room}")
             elif receiver_unique_code:
                 socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_unique_code}')
                 print(f"📤 [2] Emitted to code room (fallback): code_{receiver_unique_code}")
-            
-            # 3. Emit to receiver's device room (if we have actual deviceId)
-            if receiver_actual_device_id and receiver_actual_device_id != receiver_unique_code:
-                socketio_instance.emit('new_message', message_dict, room=f'device_{receiver_actual_device_id}')
-                print(f"📤 [3] Emitted to device room: device_{receiver_actual_device_id}")
-            
-            # 4. Also try receiver_id from data (fallback)
+
+            # 3. Fallback: receiver from request data (when 2 did not apply)
             if receiver_device_id_from_data and receiver_device_id_from_data != receiver_unique_code and receiver_device_id_from_data != receiver_actual_device_id:
                 # Check if deviceId or code
                 if len(receiver_device_id_from_data) > 10:
@@ -652,4 +650,31 @@ def register_socket_handlers(socketio_instance):
                 
         except Exception as e:
             print(f"Delete message error: {e}")
+
+    @socketio_instance.on('delete_chat_for_everyone')
+    def handle_delete_chat_for_everyone(data):
+        """Notify the other participant to delete the chat locally (both ends)."""
+        try:
+            from flask import request
+            session_data = device_sessions.get(request.sid, {})
+            device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
+            chat_id = (data.get('chatId') or '').strip()
+            receiver_id = (data.get('receiverId') or '').strip()
+            receiver_code = (data.get('receiverUniqueCode') or '').strip()
+
+            if not chat_id or not (receiver_id or receiver_code):
+                print('delete_chat_for_everyone: missing chatId or receiverId/receiverUniqueCode')
+                return
+
+            payload = {'chatId': chat_id}
+            rooms = []
+            if receiver_id:
+                rooms.append(f'device_{receiver_id}')
+            if receiver_code:
+                rooms.append(f'code_{receiver_code}')
+            for room in rooms:
+                socketio_instance.emit('chat_deleted_for_everyone', payload, room=room)
+            print(f"chat_deleted_for_everyone emitted for chat={chat_id} to receiver rooms")
+        except Exception as e:
+            print(f"delete_chat_for_everyone error: {e}")
 
