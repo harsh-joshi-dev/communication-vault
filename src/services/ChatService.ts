@@ -249,6 +249,7 @@ class ChatService {
         // Delayed chat list refresh so ChatsScreen can read after EncryptedStorage settles (receiver may get [] on first load)
         setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 400);
         setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 900);
+        setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 1500);
       } catch (error: any) {
         console.error('❌ CRITICAL: Error handling new message:', error);
         console.error('Error stack:', error.stack);

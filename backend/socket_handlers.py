@@ -5,11 +5,14 @@ Socket.io event handlers for real-time chat
 from flask_socketio import emit, join_room, leave_room
 from flask_jwt_extended import decode_token
 from models_mongo import User, Chat, Message
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Global dictionary to store device_id by socket session ID
 # This is more reliable than request attributes which may not persist
 device_sessions = {}
+# Pending messages for when receiver was disconnected; delivered on reconnect.
+# device_id -> list of (message_dict, timestamp)
+pending_for_receiver = {}
 
 def register_socket_handlers(socketio_instance):
     """Register all Socket.io event handlers"""
@@ -60,6 +63,20 @@ def register_socket_handlers(socketio_instance):
                 'uniqueCode': unique_code,
                 'deviceName': device_name
             })
+
+            # Deliver pending messages (receiver was offline when message was sent)
+            if device_id and device_id in pending_for_receiver:
+                to_deliver = [
+                    (m, t) for m, t in pending_for_receiver[device_id]
+                    if datetime.utcnow() - t < timedelta(hours=24)
+                ]
+                for msg_data, _ in to_deliver:
+                    socketio_instance.emit('new_message', msg_data, room=request.sid)
+                n = len(to_deliver)
+                del pending_for_receiver[device_id]
+                if n:
+                    print(f"✅ Delivered {n} pending message(s) to {device_id} on reconnect")
+
             print(f"✅ Device {device_id} ({device_name}) connected with code {unique_code}, Socket ID: {request.sid}")
             return True
             
@@ -367,6 +384,12 @@ def register_socket_handlers(socketio_instance):
                 socketio_instance.emit('new_message', message_dict, room=f'code_{receiver_unique_code}')
                 print(f"📤 [2b] Emitted to code room (fallback): code_{receiver_unique_code}")
 
+            # 2c. Always emit to code_{receiverUniqueCode} from request (extra delivery; client dedupes)
+            if receiver_unique_code:
+                code_room_data = f'code_{receiver_unique_code}'
+                socketio_instance.emit('new_message', message_dict, room=code_room_data)
+                print(f"📤 [2c] Emitted to code room (from data): {code_room_data}")
+
             # 3. Fallback: receiver from request data (when 2 did not apply)
             if receiver_device_id_from_data and receiver_device_id_from_data != receiver_unique_code and receiver_device_id_from_data != receiver_actual_device_id:
                 # Check if deviceId or code
@@ -389,6 +412,13 @@ def register_socket_handlers(socketio_instance):
             # 6. Send to sender
             socketio_instance.emit('new_message', message_dict, room=f'device_{device_id}')
             print(f"   ✅ [6/6] Emitted to sender: device_{device_id}")
+
+            # Store in pending so receiver gets it on reconnect if they were offline
+            receiver_for_pending = receiver_actual_device_id or receiver_device_id_from_data
+            if receiver_for_pending:
+                pending_for_receiver.setdefault(receiver_for_pending, []).append((message_dict, datetime.utcnow()))
+                while len(pending_for_receiver[receiver_for_pending]) > 50:
+                    pending_for_receiver[receiver_for_pending].pop(0)
             
             print(f"✅✅✅ MESSAGE DELIVERED! Receiver should receive it now.")
             
