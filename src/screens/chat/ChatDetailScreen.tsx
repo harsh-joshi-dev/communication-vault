@@ -577,70 +577,42 @@ const ChatDetailScreen: React.FC = () => {
         return;
       }
       
-      // Update messages list - ensure no duplicates and proper chatId
+      const mid = message.id || (message as any)._id || `r-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const created = message.createdAt || message.sentAt || new Date().toISOString();
+      const sent = message.sentAt || message.createdAt || new Date().toISOString();
       setMessages(prev => {
-        // CRITICAL: Normalize message chatId to match current chatId format
-        const normalizedMessage = {
-          ...message,
-          chatId: chatId, // Use current chatId format for consistency
-        };
-        
-        console.log(`📝 Processing message: ${normalizedMessage.id}, chatId: ${normalizedMessage.chatId}`);
-        
-        // Check if message already exists BY ID (not by reference)
-        const existingIndex = prev.findIndex(msg => msg.id === normalizedMessage.id);
+        const normalizedMessage = { ...message, id: mid, chatId, createdAt: created, sentAt: sent };
+        const existingIndex = prev.findIndex(msg => (msg.id || (msg as any)._id) === mid);
         
         if (existingIndex !== -1) {
-          console.log(`⚠️ Message ${normalizedMessage.id} already exists at index ${existingIndex}, updating it`);
-          
-          // Update existing message (avoid duplicates)
           const updated = [...prev];
           updated[existingIndex] = normalizedMessage;
-          
-          // Deduplicate by id (same ID might appear twice)
           const uniqueMap = new Map<string, Message>();
-          updated.forEach(msg => {
-            const k = msg.id || (msg as any)._id;
-            if (k && !uniqueMap.has(k)) uniqueMap.set(k, msg);
+          updated.forEach((msg, i) => {
+            const k = msg.id || (msg as any)._id || `x-${i}`;
+            if (!uniqueMap.has(k)) uniqueMap.set(k, msg);
           });
-          
-          const uniqueMessages = Array.from(uniqueMap.values());
-          
-          const sorted = uniqueMessages.sort((a, b) => 
+          return Array.from(uniqueMap.values()).sort((a, b) =>
             new Date(a.createdAt || a.sentAt || 0).getTime() - new Date(b.createdAt || b.sentAt || 0).getTime()
           );
-          
-          console.log(`✅ Updated existing message. Total: ${sorted.length} (was ${prev.length})`);
-          console.log(`   Unique Message IDs: ${sorted.map(m => m.id).join(', ')}`);
-          return sorted;
         }
-        
-        // Add new message
+
         const updated = [...prev, normalizedMessage];
-        
-        // Deduplicate by id (Map ensures uniqueness)
         const uniqueMap = new Map<string, Message>();
-        updated.forEach(msg => {
-          const k = msg.id || (msg as any)._id;
-          if (k && !uniqueMap.has(k)) uniqueMap.set(k, msg);
+        updated.forEach((msg, i) => {
+          const k = msg.id || (msg as any)._id || `x-${i}`;
+          if (!uniqueMap.has(k)) uniqueMap.set(k, msg);
         });
-        
-        const uniqueMessages = Array.from(uniqueMap.values());
-        
-        // Sort by timestamp
-        const sortedMessages = uniqueMessages.sort((a, b) => 
+        return Array.from(uniqueMap.values()).sort((a, b) =>
           new Date(a.createdAt || a.sentAt || 0).getTime() - new Date(b.createdAt || b.sentAt || 0).getTime()
         );
-        
-        console.log(`✅ Added new message to list. Total: ${sortedMessages.length} (was ${prev.length})`);
-        console.log(`   Unique Message IDs: ${sortedMessages.map(m => m.id).join(', ')}`);
-        return sortedMessages;
       });
       
       setTimeout(() => scrollToBottom(true), 150);
+      setTimeout(() => scrollToBottom(true), 400);
       const messageChatId = message.chatId || chatId;
-      chatStorageService.updateChatWithMessage(messageChatId, message, false).catch(() => {});
-      chatService.markAsRead(messageChatId, [message.id]).catch(() => {});
+      chatStorageService.updateChatWithMessage(messageChatId, { ...message, id: mid, chatId: messageChatId, createdAt: created, sentAt: sent }, false).catch(() => {});
+      chatService.markAsRead(messageChatId, [mid]).catch(() => {});
     });
     
     // Store unsubscribe function for cleanup
@@ -1326,7 +1298,7 @@ const ChatDetailScreen: React.FC = () => {
               ref={flatListRef}
               data={messages}
               renderItem={renderMessage}
-              keyExtractor={(item, index) => item.id || `message-${index}`}
+              keyExtractor={(item, index) => item.id || (item as any)._id || `msg-${index}`}
               extraData={messages}
               removeClippedSubviews={false}
               contentContainerStyle={styles.messagesList}

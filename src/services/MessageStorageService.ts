@@ -40,17 +40,19 @@ class MessageStorageService {
           if (messagesJson) {
             const messages = JSON.parse(messagesJson);
             if (Array.isArray(messages)) {
-              // Only add messages we haven't seen yet
               for (const msg of messages) {
-                if (msg.id && !seenIds.has(msg.id)) {
-                  seenIds.add(msg.id);
-                  allMessages.push(msg);
+                const kid = msg.id || (msg as any)._id || `noid-${msg.createdAt || msg.sentAt || ''}-${(msg.content || '').slice(0, 30)}`;
+                if (seenIds.has(kid)) continue;
+                seenIds.add(kid);
+                if (!msg.id && !(msg as any)._id) {
+                  (msg as any).id = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
                 }
+                allMessages.push(msg);
               }
             }
           }
         } catch (e) {
-          // Skip if key doesn't exist or parse error
+          /* skip */
         }
       }
       
@@ -67,7 +69,8 @@ class MessageStorageService {
   }
 
   /**
-   * Save a message (optimized for speed) - saves to normalized chatId
+   * Save a message - ALWAYS loads full history from all keys, merges, then persists.
+   * Prevents multiple messages being replaced by the last one.
    */
   async saveMessage(message: Message): Promise<void> {
     try {
@@ -75,68 +78,40 @@ class MessageStorageService {
         console.warn('Cannot save message without chatId');
         return;
       }
-      
-      // Normalize chatId for consistent storage
-      const normalizedChatId = this.normalizeChatId(message.chatId);
-      const key = `${MessageStorageService.MESSAGES_KEY_PREFIX}${normalizedChatId}`;
-      
-      // Use getItem directly for speed (avoid full parse if not needed)
-      const messagesJson = await EncryptedStorage.getItem(key);
-      let messages: Message[] = [];
-      
-      if (messagesJson) {
-        try {
-          messages = JSON.parse(messagesJson);
-          if (!Array.isArray(messages)) {
-            messages = [];
-          }
-        } catch (e) {
-          messages = [];
-        }
-      }
-      
-      // Check if message already exists
-      const existingIndex = messages.findIndex(msg => msg.id === message.id);
+      const messages = await this.getMessages(message.chatId);
+      const existingIndex = messages.findIndex(msg => (msg.id || (msg as any)._id) === message.id);
       if (existingIndex >= 0) {
-        // Update existing message
         messages[existingIndex] = message;
       } else {
-        // Add new message
         messages.push(message);
-        // Sort only when needed
         messages.sort((a, b) => {
           const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
           const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
           return dateA - dateB;
         });
       }
-      
-      // Save asynchronously (non-blocking) - always save with normalized chatId
-      await EncryptedStorage.setItem(key, JSON.stringify(messages));
-      
-      // Also save to original format if different (for migration)
-      if (message.chatId !== normalizedChatId) {
-        const originalKey = `${MessageStorageService.MESSAGES_KEY_PREFIX}${message.chatId}`;
-        await EncryptedStorage.setItem(originalKey, JSON.stringify(messages));
-      }
+      await this.saveMessages(message.chatId, messages);
     } catch (error) {
       console.error('Error saving message:', error);
     }
   }
 
   /**
-   * Save multiple messages - uses normalized chatId
+   * Save multiple messages - writes to ALL key variants getMessages reads from,
+   * so no partial overwrite can leave only the last message.
    */
   async saveMessages(chatId: string, messages: Message[]): Promise<void> {
     try {
       const normalizedChatId = this.normalizeChatId(chatId);
-      const key = `${MessageStorageService.MESSAGES_KEY_PREFIX}${normalizedChatId}`;
-      await EncryptedStorage.setItem(key, JSON.stringify(messages));
-      
-      // Also save to original format if different
-      if (chatId !== normalizedChatId) {
-        const originalKey = `${MessageStorageService.MESSAGES_KEY_PREFIX}${chatId}`;
-        await EncryptedStorage.setItem(originalKey, JSON.stringify(messages));
+      const keys = [
+        `${MessageStorageService.MESSAGES_KEY_PREFIX}${chatId}`,
+        `${MessageStorageService.MESSAGES_KEY_PREFIX}${normalizedChatId}`,
+        `${MessageStorageService.MESSAGES_KEY_PREFIX}chat_${normalizedChatId}`,
+      ];
+      const uniq = Array.from(new Set(keys));
+      const json = JSON.stringify(messages);
+      for (const key of uniq) {
+        await EncryptedStorage.setItem(key, json);
       }
     } catch (error) {
       console.error('Error saving messages:', error);
@@ -161,8 +136,7 @@ class MessageStorageService {
   }
 
   /**
-   * Update message status - CRITICAL: Persists status to storage
-   * Tries multiple chatId formats to find the message
+   * Update message status - uses getMessages + saveMessages so the full list is never overwritten.
    */
   async updateMessageStatus(
     chatId: string,
@@ -172,84 +146,13 @@ class MessageStorageService {
     readAt?: string,
   ): Promise<void> {
     try {
-      const normalizedChatId = this.normalizeChatId(chatId);
-      
-      console.log(`💾 Updating message status: ${messageId} -> ${status} in chat ${chatId} (normalized: ${normalizedChatId})`);
-      
-      // Try multiple chatId formats (same as getMessages)
-      const keys = [
-        `${MessageStorageService.MESSAGES_KEY_PREFIX}${chatId}`,
-        `${MessageStorageService.MESSAGES_KEY_PREFIX}${normalizedChatId}`,
-        `${MessageStorageService.MESSAGES_KEY_PREFIX}chat_${normalizedChatId}`,
-      ];
-      
-      let messages: Message[] | null = null;
-      let foundKey: string | null = null;
-      
-      // Try to find messages in any of the possible keys
-      for (const key of keys) {
-        try {
-          const messagesJson = await EncryptedStorage.getItem(key);
-          if (messagesJson) {
-            const parsed = JSON.parse(messagesJson);
-            if (Array.isArray(parsed)) {
-              // Check if message exists in this key
-              const messageIndex = parsed.findIndex((msg: Message) => msg.id === messageId);
-              if (messageIndex >= 0) {
-                messages = parsed;
-                foundKey = key;
-                console.log(`✅ Found message in key: ${key}`);
-                break;
-              }
-            }
-          }
-        } catch (e) {
-          // Continue to next key
-        }
-      }
-      
-      if (!messages || !foundKey) {
-        const allMessages = await this.getMessages(chatId);
-        const messageIndex = allMessages.findIndex(msg => (msg.id || (msg as any)._id) === messageId);
-        if (messageIndex >= 0) {
-          allMessages[messageIndex].status = status;
-          if (deliveredAt) allMessages[messageIndex].deliveredAt = deliveredAt;
-          if (readAt) allMessages[messageIndex].readAt = readAt;
-          const key = `${MessageStorageService.MESSAGES_KEY_PREFIX}${normalizedChatId}`;
-          await EncryptedStorage.setItem(key, JSON.stringify(allMessages));
-          for (const otherKey of keys) {
-            if (otherKey !== key) await EncryptedStorage.setItem(otherKey, JSON.stringify(allMessages));
-          }
-          console.log(`✅ Message status updated via getMessages: ${messageId} -> ${status}`);
-        }
-        // Status update can arrive before message is saved (race); avoid noisy warn
-        return;
-      }
-      
-      // Update message in found key
-      const messageIndex = messages.findIndex(msg => msg.id === messageId);
-      if (messageIndex >= 0) {
-        const oldStatus = messages[messageIndex].status;
-        messages[messageIndex].status = status;
-        
-        if (deliveredAt) {
-          messages[messageIndex].deliveredAt = deliveredAt;
-        }
-        if (readAt) {
-          messages[messageIndex].readAt = readAt;
-        }
-        
-        // Save updated messages to the found key
-        await EncryptedStorage.setItem(foundKey, JSON.stringify(messages));
-        console.log(`✅ Message status updated: ${messageId} from ${oldStatus} to ${status}`);
-        
-        // Also save to all other keys for consistency
-        for (const key of keys) {
-          if (key !== foundKey) {
-            await EncryptedStorage.setItem(key, JSON.stringify(messages));
-          }
-        }
-      }
+      const all = await this.getMessages(chatId);
+      const i = all.findIndex(m => (m.id || (m as any)._id) === messageId);
+      if (i < 0) return;
+      all[i].status = status;
+      if (deliveredAt) all[i].deliveredAt = deliveredAt;
+      if (readAt) all[i].readAt = readAt;
+      await this.saveMessages(chatId, all);
     } catch (error) {
       console.error('❌ Error updating message status:', error);
     }

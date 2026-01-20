@@ -288,10 +288,11 @@ def register_socket_handlers(socketio_instance):
             message_id = str(uuid.uuid4())
             chat_id_str = str(chat.id) if hasattr(chat, 'id') else chat_id or str(uuid.uuid4())
             
-            # Create message dict for immediate delivery
+            # Ensure chatId has 'chat_' prefix for consistency with frontend
+            chat_id_for_message = chat_id_str if str(chat_id_str).startswith('chat_') else ('chat_%s' % chat_id_str)
             message_dict = {
                 'id': message_id,
-                'chatId': chat_id_str,
+                'chatId': chat_id_for_message,
                 'senderId': device_id,
                 'receiverId': receiver_id or '',
                 'receiverPhoneNumber': receiver_phone_number,
