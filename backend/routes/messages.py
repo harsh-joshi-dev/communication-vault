@@ -4,13 +4,33 @@ Message routes
 
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models_mongo import Message, Chat, User
+from models_mongo import Message, Chat, User, PendingMessage
 from datetime import datetime, timedelta
 import os
 from werkzeug.utils import secure_filename
 from config import Config
 
 messages_bp = Blueprint('messages', __name__)
+
+
+@messages_bp.route('/pending', methods=['GET'])
+def get_pending_messages():
+    """Get pending messages for a device (receiver was offline). No JWT; deviceId in query. Cross-instance fallback."""
+    try:
+        device_id = (request.args.get('deviceId') or '').strip()
+        if not device_id:
+            return jsonify({'pending': []}), 200
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        docs = list(PendingMessage.objects(
+            receiver_device_id=device_id,
+            created_at__gte=cutoff
+        ).order_by('+created_at').limit(100))
+        pending = [d.message_dict for d in docs]
+        for d in docs:
+            d.delete()
+        return jsonify({'pending': pending}), 200
+    except Exception as e:
+        return jsonify({'pending': [], 'error': str(e)}), 200
 
 @messages_bp.route('/chats', methods=['GET'])
 @jwt_required()

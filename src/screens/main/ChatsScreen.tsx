@@ -36,12 +36,13 @@ const ChatsScreen: React.FC = () => {
     return () => { unM(); unC(); unD(); };
   }, []);
 
-  // When app comes to foreground, refresh chat list (in case we missed events while backgrounded)
+  // When app comes to foreground, refresh chat list + fetch pending (in case we missed events while backgrounded)
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
       if (next === 'active') {
         console.log('📱 ChatsScreen: App active, refreshing chats');
         loadChats(true);
+        chatService.fetchPendingMessages().catch(() => {});
       }
     });
     return () => sub.remove();

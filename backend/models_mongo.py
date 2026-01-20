@@ -256,6 +256,15 @@ class VaultItem(Document):
             'createdAt': self.created_at.isoformat() if self.created_at else None,
         }
 
+class PendingMessage(Document):
+    """Pending message for when receiver was offline; delivered on reconnect (cross-instance)."""
+    meta = {'collection': 'pending_messages', 'indexes': ['receiver_device_id', 'created_at']}
+
+    receiver_device_id = StringField(required=True)
+    message_dict = DictField(required=True)
+    created_at = DateTimeField(default=datetime.utcnow)
+
+
 class OTP(Document):
     """OTP model for verification"""
     meta = {'collection': 'otps'}

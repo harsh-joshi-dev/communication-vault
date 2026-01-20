@@ -4,7 +4,7 @@ Socket.io event handlers for real-time chat
 
 from flask_socketio import emit, join_room, leave_room
 from flask_jwt_extended import decode_token
-from models_mongo import User, Chat, Message
+from models_mongo import User, Chat, Message, PendingMessage
 from datetime import datetime, timedelta
 
 # Global dictionary to store device_id by socket session ID
@@ -75,7 +75,23 @@ def register_socket_handlers(socketio_instance):
                 n = len(to_deliver)
                 del pending_for_receiver[device_id]
                 if n:
-                    print(f"✅ Delivered {n} pending message(s) to {device_id} on reconnect")
+                    print(f"✅ Delivered {n} pending (in-memory) to {device_id} on reconnect")
+
+            # Deliver from MongoDB (cross-instance: receiver connected to different instance)
+            if device_id:
+                try:
+                    cutoff = datetime.utcnow() - timedelta(hours=24)
+                    docs = list(PendingMessage.objects(
+                        receiver_device_id=device_id,
+                        created_at__gte=cutoff
+                    ).order_by('+created_at').limit(100))
+                    for doc in docs:
+                        socketio_instance.emit('new_message', doc.message_dict, room=request.sid)
+                        doc.delete()
+                    if docs:
+                        print(f"✅ Delivered {len(docs)} pending (MongoDB) to {device_id} on reconnect")
+                except Exception as e:
+                    print(f"⚠️ MongoDB pending delivery failed: {e}")
 
             print(f"✅ Device {device_id} ({device_name}) connected with code {unique_code}, Socket ID: {request.sid}")
             return True
@@ -330,6 +346,7 @@ def register_socket_handlers(socketio_instance):
             
             receiver_actual_device_id = None
             receiver_code_room = None  # exact room receiver joined (code_X), for reliable delivery
+            receiver_sid = None  # direct socket id when found (extra delivery)
 
             # Priority 1: Find by uniqueCode (from QR code) - case-insensitive
             if receiver_unique_code:
@@ -340,6 +357,7 @@ def register_socket_handlers(socketio_instance):
                     su = (session_data.get('unique_code') or '').strip().upper()
                     if su and su == rc:
                         receiver_actual_device_id = session_data.get('device_id')
+                        receiver_sid = sid
                         # use exact room name the receiver joined (case-sensitive)
                         receiver_code_room = 'code_{}'.format(session_data.get('unique_code') or receiver_unique_code)
                         print(f"✅ FOUND: Device {receiver_actual_device_id} has uniqueCode {receiver_unique_code}, room={receiver_code_room}")
@@ -350,6 +368,7 @@ def register_socket_handlers(socketio_instance):
                 for sid, session_data in device_sessions.items():
                     if session_data.get('device_id') == receiver_device_id_from_data:
                         receiver_actual_device_id = receiver_device_id_from_data
+                        receiver_sid = sid
                         print(f"✅ FOUND: Device {receiver_actual_device_id} from data")
                         break
             
@@ -359,11 +378,24 @@ def register_socket_handlers(socketio_instance):
                     for sid, session_data in device_sessions.items():
                         if session_data.get('device_id') == receiver_id:
                             receiver_actual_device_id = receiver_id
+                            receiver_sid = sid
                             print(f"✅ FOUND: Device {receiver_actual_device_id} from chat")
                             break
             
             if not receiver_actual_device_id:
                 print(f"⚠️ Receiver device not found. Will use code room: code_{receiver_unique_code}")
+                # Persist to MongoDB for cross-instance delivery (receiver on different instance)
+                pend_device = receiver_device_id_from_data or (receiver_id if receiver_id and len(receiver_id) > 10 else None)
+                if pend_device:
+                    try:
+                        PendingMessage(
+                            receiver_device_id=pend_device,
+                            message_dict=message_dict,
+                            created_at=datetime.utcnow()
+                        ).save()
+                        print(f"📥 Saved to MongoDB pending_messages for device {pend_device} (cross-instance)")
+                    except Exception as e:
+                        print(f"⚠️ Failed to save pending to MongoDB: {e}")
             
             # CRITICAL: DELIVER MESSAGE FIRST (works without MongoDB)
             print(f"🚀 DELIVERING MESSAGE IMMEDIATELY (MongoDB-independent):")
@@ -390,6 +422,11 @@ def register_socket_handlers(socketio_instance):
                 socketio_instance.emit('new_message', message_dict, room=code_room_data)
                 print(f"📤 [2c] Emitted to code room (from data): {code_room_data}")
 
+            # 2d. Emit directly to receiver's socket when found (extra targeting)
+            if receiver_sid:
+                socketio_instance.emit('new_message', message_dict, room=receiver_sid)
+                print(f"📤 [2d] Emitted directly to receiver socket: {receiver_sid}")
+
             # 3. Fallback: receiver from request data (when 2 did not apply)
             if receiver_device_id_from_data and receiver_device_id_from_data != receiver_unique_code and receiver_device_id_from_data != receiver_actual_device_id:
                 # Check if deviceId or code
@@ -413,12 +450,11 @@ def register_socket_handlers(socketio_instance):
             socketio_instance.emit('new_message', message_dict, room=f'device_{device_id}')
             print(f"   ✅ [6/6] Emitted to sender: device_{device_id}")
 
-            # Store in pending so receiver gets it on reconnect if they were offline
-            receiver_for_pending = receiver_actual_device_id or receiver_device_id_from_data
-            if receiver_for_pending:
-                pending_for_receiver.setdefault(receiver_for_pending, []).append((message_dict, datetime.utcnow()))
-                while len(pending_for_receiver[receiver_for_pending]) > 50:
-                    pending_for_receiver[receiver_for_pending].pop(0)
+            # In-memory pending only when we found receiver (same-instance reconnect). MongoDB used when not found.
+            if receiver_actual_device_id:
+                pending_for_receiver.setdefault(receiver_actual_device_id, []).append((message_dict, datetime.utcnow()))
+                while len(pending_for_receiver[receiver_actual_device_id]) > 50:
+                    pending_for_receiver[receiver_actual_device_id].pop(0)
             
             print(f"✅✅✅ MESSAGE DELIVERED! Receiver should receive it now.")
             

@@ -12,6 +12,8 @@ const getApiBaseUrl = () => {
   return 'https://communication-vault.onrender.com';
 };
 
+const getApiUrl = (path: string) => `${getApiBaseUrl().replace(/\/$/, '')}${path.startsWith('/') ? path : '/' + path}`;
+
 class ChatService {
   private socket: Socket | null = null;
   private isAuthenticated: boolean = false;
@@ -104,6 +106,9 @@ class ChatService {
             
             console.log('✅ Joined device and code rooms for receiving messages');
           }
+
+          // Fetch pending from REST (cross-instance / missed on socket)
+          this.fetchPendingMessages().catch(() => {});
           
           if (this.connectionPromise) {
             this.connectionPromise = null;
@@ -141,119 +146,91 @@ class ChatService {
     return this.connectionPromise;
   }
 
+  /**
+   * Process an incoming message (socket or REST pending). Dedupes, saves, updates chat, notifies.
+   */
+  private async processIncomingMessage(messageData: any): Promise<void> {
+    const rawId = messageData?.id || messageData?._id;
+    if (rawId && this.recentNewMessageIds.has(rawId)) return;
+    if (rawId) {
+      this.recentNewMessageIds.add(rawId);
+      setTimeout(() => { this.recentNewMessageIds.delete(rawId); }, 6000);
+    }
+    try {
+      console.log('📥 RECEIVED NEW MESSAGE!', { id: rawId, chatId: messageData.chatId || messageData.chat_id, senderId: messageData.senderId || messageData.sender_id, receiverId: messageData.receiverId || messageData.receiver_id });
+      const message: Message = {
+        id: messageData.id || messageData._id || uuidv4(),
+        chatId: messageData.chatId || messageData.chat_id,
+        senderId: messageData.senderId || messageData.sender_id,
+        receiverId: messageData.receiverId || messageData.receiver_id || '',
+        type: messageData.type || 'text',
+        content: messageData.content || '',
+        mediaUrl: messageData.mediaUrl || messageData.media_url,
+        thumbnailUrl: messageData.thumbnailUrl || messageData.thumbnail_url,
+        fileName: messageData.fileName || messageData.file_name,
+        fileSize: messageData.fileSize || messageData.file_size,
+        duration: messageData.duration,
+        isViewOnce: messageData.isViewOnce || messageData.is_view_once || false,
+        autoDeleteAfter: messageData.autoDeleteAfter || messageData.auto_delete_after,
+        isDeleted: messageData.isDeleted || messageData.is_deleted || false,
+        status: messageData.status || 'sent',
+        sentAt: messageData.sentAt || messageData.sent_at || new Date().toISOString(),
+        deliveredAt: messageData.deliveredAt || messageData.delivered_at,
+        readAt: messageData.readAt || messageData.read_at,
+        createdAt: messageData.createdAt || messageData.created_at || new Date().toISOString(),
+      };
+      const deviceInfo = await deviceService.getDeviceInfo();
+      const isForMe = message.receiverId === deviceInfo.deviceId || message.receiverId === deviceInfo.uniqueCode || message.senderId !== deviceInfo.deviceId;
+      console.log(`📥 Message is for me: ${isForMe} (receiver: ${message.receiverId}, my deviceId: ${deviceInfo.deviceId}, my code: ${deviceInfo.uniqueCode})`);
+      if (message.chatId && this.socket?.connected && this.isAuthenticated) {
+        await this.joinChat(message.chatId);
+        console.log('✅ Joined chat room for received message:', message.chatId);
+      }
+      await messageStorageService.saveMessage(message);
+      console.log('✅ Message saved locally');
+      try {
+        const {chatStorageService} = await import('./ChatStorageService');
+        const normalizedChatId = message.chatId?.startsWith('chat_') ? message.chatId : `chat_${message.chatId}`;
+        const messageWithStatus = { ...message, status: message.status || 'delivered' };
+        await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, true);
+        console.log('✅ Chat updated/created with new message:', normalizedChatId);
+        const msgBase = (message.chatId || '').replace(/^chat_/, '');
+        this.chatListeners.forEach((listener) => {
+          try { chatStorageService.getChats().then(chats => { const c = chats.find(ch => { const base = (ch.id || '').replace(/^chat_/, ''); return base === msgBase || ch.id === message.chatId || ch.id === normalizedChatId; }); listener(c || ({} as Chat)); }).catch(() => listener({} as Chat)); } catch { listener({} as Chat); }
+        });
+      } catch (e: any) { console.error('❌ Error updating chat:', e); }
+      this.messageListeners.forEach((l, i) => { try { l(message); } catch (e) { console.error(`Message listener ${i} error:`, e); } });
+      setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 400);
+      setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 900);
+      setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 1500);
+    } catch (e: any) {
+      console.error('❌ processIncomingMessage error:', e);
+    }
+  }
+
+  /** Fetch pending messages from REST (cross-instance / socket-missed). Call on connect and AppState active. */
+  async fetchPendingMessages(): Promise<void> {
+    try {
+      const {deviceService} = await import('./DeviceService');
+      const {deviceId} = await deviceService.getDeviceInfo();
+      const url = getApiUrl(`/api/messages/pending?deviceId=${encodeURIComponent(deviceId)}`);
+      const res = await axios.get<{pending?: any[]}>(url, { timeout: 15000 });
+      const list = res?.data?.pending;
+      if (!Array.isArray(list) || list.length === 0) return;
+      console.log(`📥 Fetching ${list.length} pending message(s) from REST`);
+      for (const m of list) {
+        await this.processIncomingMessage(m);
+      }
+    } catch (e) {
+      // non-fatal
+    }
+  }
+
   private setupEventListeners(): void {
     if (!this.socket) return;
 
-    // New message received - dedupe when backend emits to both code_ and device_ (receiver gets 2x)
     this.socket.on('new_message', async (messageData: any) => {
-      const rawId = messageData?.id || messageData?._id;
-      if (rawId && this.recentNewMessageIds.has(rawId)) {
-        return;
-      }
-      if (rawId) {
-        this.recentNewMessageIds.add(rawId);
-        setTimeout(() => { this.recentNewMessageIds.delete(rawId); }, 6000);
-      }
-      try {
-        console.log('📥 📥 📥 RECEIVED NEW MESSAGE!', {
-          id: rawId,
-          chatId: messageData.chatId || messageData.chat_id,
-          senderId: messageData.senderId || messageData.sender_id,
-          receiverId: messageData.receiverId || messageData.receiver_id,
-          content: messageData.content?.substring(0, 50),
-          type: messageData.type,
-        });
-        
-        const message: Message = {
-          id: messageData.id || messageData._id || uuidv4(),
-          chatId: messageData.chatId || messageData.chat_id,
-          senderId: messageData.senderId || messageData.sender_id,
-          receiverId: messageData.receiverId || messageData.receiver_id || '',
-          type: messageData.type || 'text',
-          content: messageData.content || '',
-          mediaUrl: messageData.mediaUrl || messageData.media_url,
-          thumbnailUrl: messageData.thumbnailUrl || messageData.thumbnail_url,
-          fileName: messageData.fileName || messageData.file_name,
-          fileSize: messageData.fileSize || messageData.file_size,
-          duration: messageData.duration,
-          isViewOnce: messageData.isViewOnce || messageData.is_view_once || false,
-          autoDeleteAfter: messageData.autoDeleteAfter || messageData.auto_delete_after,
-          isDeleted: messageData.isDeleted || messageData.is_deleted || false,
-          status: messageData.status || 'sent',
-          sentAt: messageData.sentAt || messageData.sent_at || new Date().toISOString(),
-          deliveredAt: messageData.deliveredAt || messageData.delivered_at,
-          readAt: messageData.readAt || messageData.read_at,
-          createdAt: messageData.createdAt || messageData.created_at || new Date().toISOString(),
-        };
-
-        // Check if this is a message for current device
-        const deviceInfo = await deviceService.getDeviceInfo();
-        const isForMe = message.receiverId === deviceInfo.deviceId || 
-                       message.receiverId === deviceInfo.uniqueCode ||
-                       message.senderId !== deviceInfo.deviceId;
-        
-        console.log(`📥 Message is for me: ${isForMe} (receiver: ${message.receiverId}, my deviceId: ${deviceInfo.deviceId}, my code: ${deviceInfo.uniqueCode})`);
-
-        // Ensure we're joined to the chat room for this message
-        if (message.chatId && this.socket?.connected && this.isAuthenticated) {
-          await this.joinChat(message.chatId);
-          console.log('✅ Joined chat room for received message:', message.chatId);
-        }
-
-        // Save to local storage (ALWAYS, even if duplicate)
-        await messageStorageService.saveMessage(message);
-        console.log('✅ Message saved locally');
-
-        // Update chat with new message - CRITICAL: Creates chat if doesn't exist
-        try {
-          const {chatStorageService} = await import('./ChatStorageService');
-          
-          // Normalize chatId for chat creation
-          const normalizedChatId = message.chatId?.startsWith('chat_') 
-            ? message.chatId 
-            : `chat_${message.chatId}`;
-          
-          // Ensure message has proper status
-          const messageWithStatus = {
-            ...message,
-            status: message.status || 'delivered', // Default to delivered for received messages
-          };
-          
-          await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, true);
-          console.log('✅ Chat updated/created with new message:', normalizedChatId, 'status:', messageWithStatus.status);
-          
-          // Notify chat listeners so ChatsScreen refreshes (both sides)
-          const msgBase = (message.chatId || '').replace(/^chat_/, '');
-          this.chatListeners.forEach((listener, index) => {
-            try {
-              chatStorageService.getChats().then(chats => {
-                const c = chats.find(ch => {
-                  const base = (ch.id || '').replace(/^chat_/, '');
-                  return base === msgBase || ch.id === message.chatId || ch.id === normalizedChatId;
-                });
-                listener(c || ({} as Chat));
-              }).catch(() => listener({} as Chat));
-            } catch {
-              listener({} as Chat);
-            }
-          });
-        } catch (error: any) {
-          console.error('❌ Error updating chat:', error);
-        }
-
-        console.log(`📢 Notifying ${this.messageListeners.length} message listener(s)`);
-        this.messageListeners.forEach((listener, i) => {
-          try { listener(message); } catch (e) { console.error(`Message listener ${i} error:`, e); }
-        });
-        console.log('✅ All listeners notified');
-        // Delayed chat list refresh so ChatsScreen can read after EncryptedStorage settles (receiver may get [] on first load)
-        setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 400);
-        setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 900);
-        setTimeout(() => { this.chatListeners.forEach(l => { try { l({} as Chat); } catch (_) {} }); }, 1500);
-      } catch (error: any) {
-        console.error('❌ CRITICAL: Error handling new message:', error);
-        console.error('Error stack:', error.stack);
-      }
+      await this.processIncomingMessage(messageData);
     });
 
     // Message status update

@@ -9,9 +9,12 @@ const CHATS_STORAGE_KEY = 'device_chats';
 
 class ChatStorageService {
   private static MESSAGES_KEY_PREFIX = 'chat_messages_';
+  private lastChatsCache: Chat[] = [];
+  private lastWrittenAt: number = 0;
 
   /**
    * Get all chats. Retries when empty to handle races with concurrent save and EncryptedStorage timing.
+   * Uses in-memory cache when EncryptedStorage returns [] on emulator/slow devices.
    */
   async getChats(): Promise<Chat[]> {
     const doGet = async (): Promise<Chat[]> => {
@@ -37,7 +40,13 @@ class ChatStorageService {
         await new Promise(r => setTimeout(r, 500));
         chats = await doGet();
       }
-      if (chats.length === 0) return [];
+      if (chats.length === 0) {
+        if (this.lastChatsCache.length > 0 && (Date.now() - this.lastWrittenAt) < 60000) {
+          console.log('📥 getChats: using in-memory cache (EncryptedStorage returned [])');
+          return [...this.lastChatsCache];
+        }
+        return [];
+      }
 
       // Sort by updatedAt (most recent first)
       const sorted = chats.sort((a: Chat, b: Chat) => {
@@ -127,6 +136,8 @@ class ChatStorageService {
       if (!ok && chats.length > 0) {
         console.warn('⚠️ saveChats: verification failed after retry');
       }
+      this.lastChatsCache = [...chats];
+      this.lastWrittenAt = Date.now();
     } catch (error) {
       console.error('❌ Error saving chats:', error);
       throw error;
