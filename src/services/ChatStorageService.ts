@@ -366,18 +366,34 @@ class ChatStorageService {
           }
         }
 
-        // CREATE new chat
+        // CREATE new chat (CRITICAL for receiver device)
         console.log(`📝 Chat not found, creating new chat...`);
         const isFromMe = message.senderId === currentDeviceId;
         const otherDeviceId = isFromMe ? message.receiverId : message.senderId;
         
-        if (otherDeviceId) {
-          const otherUniqueCode = otherDeviceId.substring(0, 8).toUpperCase();
-          const otherName = 'Unknown User';
+        console.log(`📝 Chat creation details: isFromMe=${isFromMe}, otherDeviceId=${otherDeviceId}, senderId=${message.senderId}, receiverId=${message.receiverId}, currentDeviceId=${currentDeviceId}`);
+        
+        // ALWAYS create chat if we have a message (even if otherDeviceId is empty - we'll use senderId/receiverId)
+        const actualOtherId = otherDeviceId || (isFromMe ? message.receiverId : message.senderId) || 'unknown';
+        
+        if (actualOtherId && actualOtherId !== 'unknown') {
+          const otherUniqueCode = actualOtherId.length >= 8 ? actualOtherId.substring(0, 8).toUpperCase() : actualOtherId.toUpperCase();
+          // Try to get name from message metadata or use default
+          const otherName = (message as any).receiverName || 
+                           (message as any).receiverPhoneNumber || 
+                           (message as any).senderName ||
+                           (message as any).contactName ||
+                           'Unknown User';
+          
           const newChat: Chat = {
             id: normalizedChatId,
-            participantIds: [currentDeviceId, otherDeviceId],
-            otherUser: { id: otherDeviceId, name: otherName, uniqueCode: otherUniqueCode, isAppUser: true },
+            participantIds: [currentDeviceId, actualOtherId].filter(Boolean) as string[],
+            otherUser: { 
+              id: actualOtherId, 
+              name: otherName, 
+              uniqueCode: otherUniqueCode, 
+              isAppUser: true 
+            },
             lastMessage: message,
             unreadCount: isFromMe ? 0 : (incrementUnread ? 1 : 0),
             isBlocked: false,
@@ -386,9 +402,11 @@ class ChatStorageService {
           };
           chats.push(newChat);
           await this.saveChats(chats);
-          console.log(`✅ Created new chat: ${normalizedChatId} with ${otherName} (${otherDeviceId})`);
+          console.log(`✅ Created new chat: ${normalizedChatId} with ${otherName} (${actualOtherId}) - should appear in chat list now!`);
+          
+          // Chat is now created - listeners will be notified by ChatService
         } else {
-          console.warn(`⚠️ Cannot create chat - no other device ID found`);
+          console.warn(`⚠️ Cannot create chat - no valid device ID found. senderId=${message.senderId}, receiverId=${message.receiverId}, currentDeviceId=${currentDeviceId}`);
         }
       }
     } catch (error) {

@@ -61,16 +61,29 @@ const ChatDetailScreen: React.FC = () => {
   // Reload messages and chat name when screen comes into focus (like WhatsApp)
   useFocusEffect(
     React.useCallback(() => {
-      chatService.connect().catch(() => {});
+      // Load messages and chat name immediately
       loadMessages();
       loadChatName();
       chatStorageService.markChatAsRead(chatId);
-      chatService.joinChat(chatId);
+      
+      // Connect and join chat (wait for connection before joining)
+      chatService.connect().then(() => {
+        // Join chat after connection is established
+        chatService.joinChat(chatId).catch(() => {
+          // Join failed, but that's okay - will retry
+          console.log('⚠️ Failed to join chat initially, will retry when connected');
+        });
+      }).catch(() => {
+        // Connection failed, but that's okay - messages will still load from storage
+        console.log('⚠️ Connection failed, messages loaded from storage');
+      });
       
       // Fetch pending messages immediately when screen focuses
       chatService.fetchPendingMessages().then(() => {
         loadMessages(); // Reload messages after fetching pending
-      }).catch(() => {});
+      }).catch(() => {
+        // Errors are handled internally
+      });
       
       // Poll for pending messages every 5 seconds (critical when socket is disconnected)
       const pendingInterval = setInterval(() => {
@@ -783,7 +796,8 @@ const ChatDetailScreen: React.FC = () => {
     setMessages(prev => [...prev, tempMessage]);
     scrollToBottom();
 
-    // Send message (never throws errors - always succeeds optimistically)
+    // Send message (ALWAYS succeeds immediately - message saved locally, socket send happens in background)
+    // This ensures message appears immediately and chat appears in chat list
     chatService.sendMessage(
       chatId,
       receiverId || undefined,
@@ -798,42 +812,33 @@ const ChatDetailScreen: React.FC = () => {
         receiverUniqueCode: receiverUniqueCode,
       },
     ).then((sentMessage) => {
-      console.log('✅ Message sent successfully:', sentMessage.id);
+      console.log('✅ Message sent (optimistic):', sentMessage.id);
       
-      // Replace temp message with real message (or add if not found)
+      // Replace temp message with real message from sendMessage (which is already saved)
       setMessages(prev => {
-        const exists = prev.find(msg => msg.id === tempMessageId || msg.id === sentMessage.id || (msg as any)._id === sentMessage.id);
-        if (exists) {
+        // Remove temp message and add the real message (which sendMessage already saved)
+        const withoutTemp = prev.filter(msg => msg.id !== tempMessageId);
+        
+        // Check if real message already exists (it might if message listener processed it)
+        const exists = withoutTemp.find(msg => msg.id === sentMessage.id || (msg as any)._id === sentMessage.id);
+        
+        if (!exists) {
+          // Add the sent message
+          withoutTemp.push({...sentMessage, status: sentMessage.status || 'sent', chatId});
+        } else {
           // Update existing message
-          const updated = prev.map(msg => {
-            if (msg.id === tempMessageId || msg.id === sentMessage.id || (msg as any)._id === sentMessage.id) {
+          const updated = withoutTemp.map(msg => {
+            if (msg.id === sentMessage.id || (msg as any)._id === sentMessage.id) {
               return {...sentMessage, status: sentMessage.status || 'sent', chatId};
             }
             return msg;
           });
-          
-          // Remove duplicates and sort
-          const uniqueMap = new Map<string, Message>();
-          updated.forEach(msg => {
-            const msgId = msg.id || (msg as any)._id || '';
-            if (msgId && !uniqueMap.has(msgId)) {
-              uniqueMap.set(msgId, msg);
-            }
-          });
-          
-          return Array.from(uniqueMap.values()).sort((a, b) => {
-            const dateA = new Date(a.createdAt || a.sentAt || 0).getTime();
-            const dateB = new Date(b.createdAt || b.sentAt || 0).getTime();
-            return dateA - dateB;
-          });
+          withoutTemp.splice(0, withoutTemp.length, ...updated);
         }
-        
-        // If temp message not found, add the sent message
-        const updated = [...prev, {...sentMessage, status: sentMessage.status || 'sent', chatId}];
         
         // Remove duplicates and sort
         const uniqueMap = new Map<string, Message>();
-        updated.forEach(msg => {
+        withoutTemp.forEach(msg => {
           const msgId = msg.id || (msg as any)._id || '';
           if (msgId && !uniqueMap.has(msgId)) {
             uniqueMap.set(msgId, msg);
@@ -847,28 +852,18 @@ const ChatDetailScreen: React.FC = () => {
         });
       });
       
-      // Update chat storage with new message (for ChatsScreen) - this ensures chat appears in list
-      chatStorageService.updateChatWithMessage(chatId, {...sentMessage, chatId}, false).then(() => {
-        console.log('✅ Chat updated in storage, should appear in chat list');
-        // Notify chat list to refresh
-        chatService.notifyChatListRefresh();
-      }).catch(err => {
-        console.error('Error updating chat:', err);
-      });
-      
+      // Chat is already updated by sendMessage, but refresh to ensure it's visible
+      chatService.notifyChatListRefresh();
       scrollToBottom();
       
-      // Mark messages as read if receiver is viewing (optional - don't auto-mark sent messages as read)
+      // Message will be updated again when socket confirms (if connected)
     }).catch((error: any) => {
-      // Even if there's an error, keep the message (optimistic)
-      console.warn('Message send warning (message kept locally):', error?.message);
+      // Should never happen - sendMessage always succeeds immediately
+      console.warn('Message send error (should not happen):', error?.message);
       // Update status to show it's pending
       setMessages(prev => prev.map(msg => 
         msg.id === tempMessageId ? {...msg, status: 'pending'} : msg
       ));
-      
-      // Still try to update chat storage even on error (for chat list)
-      chatStorageService.updateChatWithMessage(chatId, {...tempMessage, status: 'pending'}, false).catch(() => {});
     });
   };
 

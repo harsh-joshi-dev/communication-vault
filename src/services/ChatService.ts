@@ -135,8 +135,13 @@ class ChatService {
           if (code) socket.emit('join_chat', {chatId: `code_${code}`});
           console.log('✅ Joined device and code rooms');
         }
-        // Fetch pending messages immediately after connecting
-        this.fetchPendingMessages().catch(() => {});
+        // Fetch pending messages immediately after connecting (CRITICAL for receiver device)
+        console.log('📥 Fetching pending messages immediately after connection...');
+        this.fetchPendingMessages().then(() => {
+          console.log('✅ Pending messages fetched after connection');
+        }).catch(() => {
+          console.log('⚠️ Pending messages fetch failed after connection');
+        });
         resolve();
       });
 
@@ -213,27 +218,26 @@ class ChatService {
       await messageStorageService.saveMessage(message);
       console.log('✅ Message saved locally');
       
+      // Determine if message is from me or to me
+      const isFromMe = message.senderId === deviceInfo.deviceId || message.senderId === deviceInfo.uniqueCode;
+      const otherUserId = isFromMe ? message.receiverId : message.senderId;
+      
+      let minimalChat: Chat | null = null;
+      
       try {
         const {chatStorageService} = await import('./ChatStorageService');
         const normalizedChatId = message.chatId?.startsWith('chat_') ? message.chatId : `chat_${message.chatId}`;
         const messageWithStatus = { ...message, chatId: normalizedChatId, status: message.status || 'delivered' };
         
-        // Determine if message is from me or to me
-        const isFromMe = message.senderId === deviceInfo.deviceId || message.senderId === deviceInfo.uniqueCode;
-        const otherUserId = isFromMe ? message.receiverId : message.senderId;
-        
         console.log(`📝 Creating/updating chat: ${normalizedChatId}, isFromMe: ${isFromMe}, otherUserId: ${otherUserId}`);
         
-        // Update or create chat - this ensures chat appears in chat list
+        // Update or create chat - this ensures chat appears in chat list (CRITICAL for receiver device)
         // incrementUnread should be true only if message is NOT from me (it's from another user)
         await chatStorageService.updateChatWithMessage(normalizedChatId, messageWithStatus, !isFromMe);
         console.log('✅ Chat updated/created with new message:', normalizedChatId);
         
-        // Notify chat list to refresh immediately
-        this.notifyChatListRefresh();
-        
-        // Also trigger chat listeners with minimal chat data
-        const minimalChat: Chat = {
+        // Create minimal chat object for listeners
+        minimalChat = {
           id: normalizedChatId,
           participantIds: [message.senderId, message.receiverId].filter(Boolean) as string[],
           otherUser: { 
@@ -248,24 +252,10 @@ class ChatService {
           createdAt: new Date().toISOString(),
         };
         
-        // Notify chat listeners
-        this.chatListeners.forEach((l) => { 
-          try { 
-            l(minimalChat); 
-          } catch (err) {
-            console.error('Error in chat listener:', err);
-          }
-        });
-        
-        // Trigger multiple refreshes to ensure UI updates
-        setTimeout(() => { this.notifyChatListRefresh(); }, 100);
-        setTimeout(() => { this.notifyChatListRefresh(); }, 500);
-        setTimeout(() => { this.notifyChatListRefresh(); }, 1000);
       } catch (e: any) { 
         console.error('❌ Error updating chat:', e);
-        // Still notify chat list refresh even on error
-        this.notifyChatListRefresh();
       }
+      
       // Notify all message listeners (for ChatDetailScreen)
       this.messageListeners.forEach((l, i) => { 
         try { 
@@ -275,21 +265,34 @@ class ChatService {
         } 
       });
       
-      // Notify chat listeners to refresh chat list (with delays to ensure UI updates)
-      setTimeout(() => { 
-        this.notifyChatListRefresh();
+      // Notify chat listeners immediately (this is CRITICAL for receiver device to see new chat)
+      if (minimalChat) {
+        console.log('📢 Triggering chat listeners immediately with minimal chat');
         this.chatListeners.forEach(l => { 
           try { 
-            l(minimalChat); 
-          } catch (_) {} 
-        }); 
+            l(minimalChat!); 
+          } catch (err) {
+            console.error('Error in chat listener:', err);
+          } 
+        });
+      }
+      
+      // Trigger multiple refreshes to ensure UI updates (important for receiver device)
+      console.log('📢 Notifying chat list to refresh multiple times (receiver should see new chat)');
+      this.notifyChatListRefresh(); // Immediate
+      setTimeout(() => { 
+        this.notifyChatListRefresh();
+        if (minimalChat) {
+          this.chatListeners.forEach(l => { 
+            try { 
+              l(minimalChat!); 
+            } catch (_) {} 
+          });
+        }
       }, 100);
-      setTimeout(() => { 
-        this.notifyChatListRefresh();
-      }, 500);
-      setTimeout(() => { 
-        this.notifyChatListRefresh();
-      }, 1000);
+      setTimeout(() => { this.notifyChatListRefresh(); }, 500);
+      setTimeout(() => { this.notifyChatListRefresh(); }, 1000);
+      setTimeout(() => { this.notifyChatListRefresh(); }, 2000); // Extra delay for receiver
     } catch (e: any) {
       console.error('❌ processIncomingMessage error:', e);
     }
@@ -365,18 +368,31 @@ class ChatService {
         return;
       }
       
-      console.log(`📥 fetchPending: got ${list.length} message(s) for device ${deviceId.slice(0, 8)}...`);
-      
-      // Process all messages
-      for (const m of list) {
-        try {
-          await this.processIncomingMessage(m);
-        } catch (err) {
-          console.error('Error processing pending message:', err);
+        console.log(`📥 fetchPending: got ${list.length} message(s) for device ${deviceId.slice(0, 8)}...`);
+        
+        // Process all messages
+        for (const m of list) {
+          try {
+            console.log('📥 Processing pending message:', {
+              id: m?.id || m?._id,
+              chatId: m?.chatId || m?.chat_id,
+              senderId: m?.senderId || m?.sender_id,
+              receiverId: m?.receiverId || m?.receiver_id,
+              content: m?.content?.substring(0, 30) || m?.type,
+            });
+            await this.processIncomingMessage(m);
+            console.log('✅ Pending message processed successfully');
+          } catch (err) {
+            console.error('❌ Error processing pending message:', err);
+          }
         }
-      }
-      
-      console.log(`✅ fetchPending: processed ${list.length} message(s), chat list should update`);
+        
+        console.log(`✅ fetchPending: processed ${list.length} message(s), chat list should update`);
+        
+        // Force chat list refresh after processing all pending messages
+        this.notifyChatListRefresh();
+        setTimeout(() => { this.notifyChatListRefresh(); }, 500);
+        setTimeout(() => { this.notifyChatListRefresh(); }, 1500);
     } catch (e: any) {
       // Silently handle any unexpected errors - don't spam logs
       const now = Date.now();
@@ -401,7 +417,19 @@ class ChatService {
     });
 
     this.socket.on('new_message', async (messageData: any) => {
-      await this.processIncomingMessage(messageData);
+      console.log('📨 Socket new_message event received:', {
+        id: messageData?.id || messageData?._id,
+        chatId: messageData?.chatId || messageData?.chat_id,
+        senderId: messageData?.senderId || messageData?.sender_id,
+        receiverId: messageData?.receiverId || messageData?.receiver_id,
+        content: messageData?.content?.substring(0, 30) || messageData?.type,
+      });
+      try {
+        await this.processIncomingMessage(messageData);
+        console.log('✅ Socket message processed successfully');
+      } catch (error) {
+        console.error('❌ Error processing socket message:', error);
+      }
     });
 
     // Message status update
@@ -566,22 +594,26 @@ class ChatService {
       createdAt: new Date().toISOString(),
     };
 
-    // Save locally immediately
+    // Save locally immediately (ALWAYS succeeds)
     await messageStorageService.saveMessage(message);
+    console.log('✅ Message saved locally:', message.id);
 
-    // Try to connect if not connected (connect retries up to 4x for Render cold start)
-    if (!this.socket?.connected || !this.isAuthenticated) {
-      try {
-        await this.connect();
-        // One more try if still not connected
-        if (!this.socket?.connected || !this.isAuthenticated) {
-          await this.connect();
-        }
-      } catch {
-        message.status = 'pending';
-        await messageStorageService.saveMessage(message);
-        return message;
-      }
+    // Update chat immediately so it appears in chat list (CRITICAL - must happen before socket send)
+    try {
+      const {chatStorageService} = await import('./ChatStorageService');
+      await chatStorageService.updateChatWithMessage(chatId, message, false);
+      console.log('✅ Chat updated immediately - should appear in chat list');
+      // Notify chat list immediately (CRITICAL for new chats)
+      this.notifyChatListRefresh();
+      this.chatListeners.forEach(l => { 
+        try { 
+          l({} as Chat); 
+        } catch (e) {} 
+      });
+    } catch (e) {
+      console.error('❌ Error updating chat immediately:', e);
+      // Still notify even on error
+      this.notifyChatListRefresh();
     }
 
     // Prepare message data
@@ -603,23 +635,27 @@ class ChatService {
       email: options?.email,
     };
 
-    return new Promise((resolve) => {
-      // Set timeout for response (increased for better reliability)
-      const timeout = setTimeout(async () => {
-        console.warn('⏱️ No response from server after 20s, using optimistic message');
-        message.status = 'sent';
-        messageStorageService.saveMessage(message).catch(console.error);
+    // Resolve immediately - message is already saved and chat updated
+    // Then try to send via socket in background (non-blocking)
+    const sendPromise = (async () => {
+      // Try to connect if not connected (non-blocking - don't wait long)
+      let isConnected = this.socket?.connected && this.isAuthenticated;
+      if (!isConnected) {
         try {
-          const {chatStorageService} = await import('./ChatStorageService');
-          await chatStorageService.updateChatWithMessage(chatId, message, false);
-        } catch (e) {}
-        this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
-        resolve(message);
-      }, 20000);
+          // Give connection 2 seconds max, then proceed
+          await Promise.race([
+            this.connect(),
+            new Promise(resolve => setTimeout(resolve, 2000))
+          ]);
+          isConnected = this.socket?.connected && this.isAuthenticated;
+        } catch {
+          isConnected = false;
+        }
+      }
 
-      // Send message
-      if (this.socket?.connected && this.isAuthenticated) {
-        console.log('📤 Sending message:', {
+      // Send message via socket if connected
+      if (isConnected && this.socket?.connected && this.isAuthenticated) {
+        console.log('📤 Sending message via socket:', {
           chatId, 
           type, 
           contentLength: content.length,
@@ -627,26 +663,35 @@ class ChatService {
           receiverUniqueCode: options?.receiverUniqueCode,
         });
         
+        const timeout = setTimeout(async () => {
+          console.log('⏱️ No response from server after 15s (message already saved locally)');
+          // Message already saved, just update status
+          try {
+            message.status = 'sent';
+            await messageStorageService.saveMessage(message);
+            const {chatStorageService} = await import('./ChatStorageService');
+            await chatStorageService.updateChatWithMessage(chatId, message, false);
+            this.notifyChatListRefresh();
+          } catch (e) {}
+        }, 15000);
+        
         this.socket.emit('send_message', messageData, async (response: any) => {
           clearTimeout(timeout);
           
           if (response?.error) {
-            console.error('❌ Server error:', response.error);
+            console.log('⚠️ Server error (message already saved):', response.error);
             message.status = 'pending';
-            messageStorageService.saveMessage(message).catch(console.error);
-            import('./ChatStorageService').then(({chatStorageService}) =>
-              chatStorageService.updateChatWithMessage(chatId, message, false)
-            ).catch(() => {});
-            this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
-            resolve(message);
+            await messageStorageService.saveMessage(message);
+            const {chatStorageService} = await import('./ChatStorageService');
+            await chatStorageService.updateChatWithMessage(chatId, message, false);
+            this.notifyChatListRefresh();
             return;
           }
 
           if (response?.message) {
-            console.log('✅ Message sent successfully!', {
+            console.log('✅ Message confirmed by server!', {
               messageId: response.message.id || response.message._id,
               chatId: response.message.chatId || response.message.chat_id,
-              status: response.message.status,
             });
             const serverMessage: Message = {
               ...message,
@@ -657,14 +702,7 @@ class ChatService {
               deliveredAt: response.message.deliveredAt || response.message.delivered_at,
             };
             
-            if (serverMessage.chatId !== chatId) {
-              console.log(`📝 Chat ID updated: ${chatId} -> ${serverMessage.chatId}`);
-              await this.joinChat(serverMessage.chatId);
-            } else {
-              await this.joinChat(chatId);
-            }
-
-            // Replace optimistic message with server message in storage (avoid duplicates)
+            // Replace optimistic message with server message
             const cur = await messageStorageService.getMessages(serverMessage.chatId || chatId);
             const without = cur.filter(m => (m.id || (m as any)._id) !== message.id);
             const idx = without.findIndex(m => (m.id || (m as any)._id) === serverMessage.id);
@@ -672,49 +710,40 @@ class ChatService {
               ? without.map((m, i) => (i === idx ? serverMessage : m))
               : [...without, serverMessage];
             await messageStorageService.saveMessages(serverMessage.chatId || chatId, toSave);
+            
             const {chatStorageService} = await import('./ChatStorageService');
             if (serverMessage.chatId !== chatId) {
               try {
                 await chatStorageService.updateChatId(chatId, serverMessage.chatId);
-              } catch (e) {
-                console.error('Error updating chat ID:', e);
-              }
+              } catch (e) {}
             }
             await chatStorageService.updateChatWithMessage(serverMessage.chatId || chatId, serverMessage, false);
-            // Notify chat list to refresh so new chat appears
+            await this.joinChat(serverMessage.chatId || chatId);
             this.notifyChatListRefresh();
-            this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
-            resolve(serverMessage);
           } else {
-            console.warn('⚠️ Server responded but no message in response, assuming success');
+            // Server responded but no message - assume success
+            console.log('✅ Server confirmed (no message data), assuming success');
             message.status = 'sent';
             await messageStorageService.saveMessage(message);
             await this.joinChat(chatId);
-            try {
-              const {chatStorageService} = await import('./ChatStorageService');
-              await chatStorageService.updateChatWithMessage(chatId, message, false);
-              // Notify chat list to refresh so new chat appears
-              this.notifyChatListRefresh();
-            } catch (e) {}
-            this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
-            resolve(message);
+            const {chatStorageService} = await import('./ChatStorageService');
+            await chatStorageService.updateChatWithMessage(chatId, message, false);
+            this.notifyChatListRefresh();
           }
         });
       } else {
-        clearTimeout(timeout);
-        console.warn('⚠️ Socket not connected, message saved locally');
+        // Socket not connected - message already saved, will sync later
+        console.log('📤 Message saved locally (socket not connected, will sync when connected)');
         message.status = 'pending';
-        messageStorageService.saveMessage(message).catch(console.error);
-        import('./ChatStorageService').then(({chatStorageService}) =>
-          chatStorageService.updateChatWithMessage(chatId, message, false).then(() => {
-            // Notify chat list to refresh so new chat appears
-            this.notifyChatListRefresh();
-          })
-        ).catch(() => {});
-        this.chatListeners.forEach(l => { try { l({} as Chat); } catch (e) {} });
-        resolve(message);
+        await messageStorageService.saveMessage(message);
+        // Try to connect in background for future messages
+        this.connect().catch(() => {});
       }
-    });
+    })();
+
+    // Don't wait for socket send - resolve immediately
+    // Message is already saved and chat updated
+    return Promise.resolve(message);
   }
 
   async createChat(params: {
@@ -761,18 +790,24 @@ class ChatService {
     if (this.socket?.connected && this.isAuthenticated) {
       console.log('📥 Joining chat room:', chatId);
       this.socket.emit('join_chat', {chatId});
-    } else {
-      console.warn('⚠️ Cannot join chat - socket not connected/authenticated');
-      // Try to connect first
-      try {
-        await this.connect();
-        if (this.socket?.connected && this.isAuthenticated) {
-          console.log('📥 Joining chat room after reconnection:', chatId);
-          this.socket.emit('join_chat', {chatId});
-        }
-      } catch (error) {
-        console.error('❌ Failed to connect before joining chat:', error);
+      return;
+    }
+    
+    // Socket not connected - try to connect first, but don't throw error
+    try {
+      await this.connect();
+      if (this.socket?.connected && this.isAuthenticated) {
+        console.log('📥 Joining chat room after connection:', chatId);
+        this.socket.emit('join_chat', {chatId});
+      } else {
+        // Connection failed or still not authenticated - will retry later
+        // Don't log as error, just info - it will retry when socket connects
+        console.log('📥 Chat room join queued (socket connecting):', chatId);
       }
+    } catch (error) {
+      // Connection failed - don't throw, just log
+      // Messages will still work via pending fetch
+      console.log('📥 Chat room join queued (connection failed, will retry):', chatId);
     }
   }
 

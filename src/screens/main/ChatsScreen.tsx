@@ -27,8 +27,12 @@ const ChatsScreen: React.FC = () => {
 
   // Subscribe to new messages and chat updates ONCE on mount; stay subscribed until unmount
   useEffect(() => {
-    const unM = chatService.onMessage(() => { loadChats(true); });
+    const unM = chatService.onMessage((message: Message) => { 
+      console.log('📨 ChatsScreen: New message received, reloading chats');
+      loadChats(true); 
+    });
     const unC = chatService.onChatUpdate((chat: Chat) => {
+      console.log('📨 ChatsScreen: Chat update received:', chat.id);
       // Normalize chatId for comparison (remove 'chat_' prefix)
       const normalizeId = (id: string) => (id || '').replace(/^chat_/, '');
       
@@ -100,20 +104,47 @@ const ChatsScreen: React.FC = () => {
   useFocusEffect(
     useCallback(() => {
       console.log('📱 ChatsScreen: Screen focused, loading chats...');
+      
+      // Load chats immediately
+      loadChats();
+      
+      // Connect and fetch pending messages
       chatService.connect().then(() => {
-        loadChats();
+        console.log('📱 ChatsScreen: Connected, fetching pending messages...');
         // Fetch pending (cross-instance/offline) then reload so new chats appear on receiver
-        chatService.fetchPendingMessages().then(() => loadChats(true));
+        chatService.fetchPendingMessages().then(() => {
+          console.log('📱 ChatsScreen: Pending messages fetched, reloading chats...');
+          loadChats(true);
+        }).catch(() => {
+          loadChats(true);
+        });
       }).catch(() => {
-        loadChats();
-        chatService.fetchPendingMessages().then(() => loadChats(true));
+        console.log('📱 ChatsScreen: Connection failed, fetching pending anyway...');
+        // Even if connection fails, try to fetch pending messages (important for receiver)
+        chatService.fetchPendingMessages().then(() => {
+          loadChats(true);
+        }).catch(() => {
+          loadChats(true);
+        });
         setTimeout(() => chatService.connect().catch(() => {}), 3000);
       });
 
-      // When list is empty, retry fetchPending after 2s (catches timing/connection delays)
-      const retryEmpty = setTimeout(() => {
-        chatService.fetchPendingMessages().then(() => loadChats(true));
-      }, 2000);
+      // When list is empty, retry fetchPending after delays (catches timing/connection delays)
+      // This is CRITICAL for receiver device to get messages
+      const retries = [2000, 5000, 10000];
+      const retryTimeouts: NodeJS.Timeout[] = [];
+      retries.forEach((delay, index) => {
+        const timeoutId = setTimeout(() => {
+          console.log(`📱 ChatsScreen: Retry ${index + 1} - fetching pending messages after ${delay}ms...`);
+          chatService.fetchPendingMessages().then(() => {
+            console.log(`📱 ChatsScreen: Retry ${index + 1} - pending fetched, reloading chats...`);
+            loadChats(true);
+          }).catch(() => {
+            loadChats(true);
+          });
+        }, delay);
+        retryTimeouts.push(timeoutId);
+      });
 
       // Listen for typing indicators
       const setupTypingListener = () => {
@@ -238,7 +269,8 @@ const ChatsScreen: React.FC = () => {
         if (typingSetupTimeout) clearTimeout(typingSetupTimeout);
         if (refreshInterval) clearInterval(refreshInterval);
         if (pendingInterval) clearInterval(pendingInterval);
-        clearTimeout(retryEmpty);
+        // Clear all retry timeouts
+        retryTimeouts.forEach(timeoutId => clearTimeout(timeoutId));
       };
     }, [])
   );
