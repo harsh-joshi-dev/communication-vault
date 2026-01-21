@@ -13,19 +13,24 @@ import {
   StatusBar,
   AppState,
   AppStateStatus,
+  Modal,
+  Dimensions,
+  ActivityIndicator,
 } from 'react-native';
 import {useRoute, useNavigation, useFocusEffect} from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/Ionicons';
-import {Message} from '../../types';
+import {Message, Contact} from '../../types';
 import {format} from 'date-fns';
 import {chatService} from '../../services/ChatService';
 import {deviceService} from '../../services/DeviceService';
 import {chatStorageService} from '../../services/ChatStorageService';
 import {messageStorageService} from '../../services/MessageStorageService';
-import {launchImageLibrary} from 'react-native-image-picker';
+import {launchImageLibrary, launchCamera} from 'react-native-image-picker';
 import DocumentPicker from 'react-native-document-picker';
 import AudioRecorderPlayer from 'react-native-audio-recorder-player';
 import {mediaService} from '../../services/MediaService';
+import Video from 'react-native-video';
+import Contacts from 'react-native-contacts';
 
 const ChatDetailScreen: React.FC = () => {
   const route = useRoute();
@@ -55,6 +60,10 @@ const ChatDetailScreen: React.FC = () => {
   const [isEditingName, setIsEditingName] = useState(false);
   const [editNameText, setEditNameText] = useState<string>('');
   const [chatCreatedAt, setChatCreatedAt] = useState<string | null>(null); // Chat creation timestamp
+  const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
+  const [showVideoPlayer, setShowVideoPlayer] = useState(false);
+  const [currentVideoUrl, setCurrentVideoUrl] = useState<string | null>(null);
+  const [videoPaused, setVideoPaused] = useState(false);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -1127,90 +1136,96 @@ const ChatDetailScreen: React.FC = () => {
     });
   };
 
-  const handleSendImage = async () => {
+  const handleSendImage = async (useCamera: boolean = false) => {
     try {
-      launchImageLibrary(
-        {
-          mediaType: 'photo',
-          quality: 0.8,
-        },
-        async response => {
-          if (response.assets && response.assets[0]) {
-            const asset = response.assets[0];
-            // Send image (never throws errors)
-            chatService.sendMessage(
-              chatId,
-              receiverId || undefined,
-              'image',
-              asset.fileName || 'image.jpg',
-              asset.uri,
-              {
-                fileName: asset.fileName,
-                fileSize: asset.fileSize,
-                isAppUser: isAppUser ?? false,
-                phoneNumber,
-                contactName,
-                email,
-                receiverUniqueCode: receiverUniqueCode,
-              },
-            ).then((sentMessage) => {
-              chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
-                chatService.notifyChatListRefresh();
-              }).catch(err => 
-                console.error('Error updating chat:', err)
-              );
-              scrollToBottom();
-            }).catch((error: any) => {
-              console.warn('Image send warning (saved locally):', error?.message);
-            });
-          }
-        },
-      );
+      setShowAttachmentMenu(false);
+      const options = {
+        mediaType: 'photo' as const,
+        quality: 0.8 as const,
+        saveToPhotos: false,
+      };
+      
+      const picker = useCamera ? launchCamera : launchImageLibrary;
+      
+      picker(options, async response => {
+        if (response.assets && response.assets[0]) {
+          const asset = response.assets[0];
+          // Send image (never throws errors)
+          chatService.sendMessage(
+            chatId,
+            receiverId || undefined,
+            'image',
+            asset.fileName || 'image.jpg',
+            asset.uri,
+            {
+              fileName: asset.fileName,
+              fileSize: asset.fileSize,
+              isAppUser: isAppUser ?? false,
+              phoneNumber,
+              contactName,
+              email,
+              receiverUniqueCode: receiverUniqueCode,
+            },
+          ).then((sentMessage) => {
+            chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
+              chatService.notifyChatListRefresh();
+            }).catch(err => 
+              console.error('Error updating chat:', err)
+            );
+            scrollToBottom();
+          }).catch((error: any) => {
+            console.warn('Image send warning (saved locally):', error?.message);
+          });
+        }
+      });
     } catch (error) {
       console.error('Error sending image:', error);
     }
   };
 
-  const handleSendVideo = async () => {
+  const handleSendVideo = async (useCamera: boolean = false) => {
     try {
-      launchImageLibrary(
-        {
-          mediaType: 'video',
-          quality: 0.8,
-        },
-        async response => {
-          if (response.assets && response.assets[0]) {
-            const asset = response.assets[0];
-            // Send video (never throws errors)
-            chatService.sendMessage(
-              chatId,
-              receiverId || undefined,
-              'video',
-              asset.fileName || 'video.mp4',
-              asset.uri,
-              {
-                fileName: asset.fileName,
-                fileSize: asset.fileSize,
-                duration: asset.duration,
-                isAppUser: isAppUser ?? false,
-                phoneNumber,
-                contactName,
-                email,
-                receiverUniqueCode: receiverUniqueCode,
-              },
-            ).then((sentMessage) => {
-              chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
-                chatService.notifyChatListRefresh();
-              }).catch(err => 
-                console.error('Error updating chat:', err)
-              );
-              scrollToBottom();
-            }).catch((error: any) => {
-              console.warn('Video send warning (saved locally):', error?.message);
-            });
-          }
-        },
-      );
+      setShowAttachmentMenu(false);
+      const options = {
+        mediaType: 'video' as const,
+        videoQuality: 'high' as const,
+        saveToPhotos: false,
+      };
+      
+      const picker = useCamera ? launchCamera : launchImageLibrary;
+      
+      picker(options, async response => {
+        if (response.assets && response.assets[0]) {
+          const asset = response.assets[0];
+          // Send video (never throws errors)
+          chatService.sendMessage(
+            chatId,
+            receiverId || undefined,
+            'video',
+            asset.fileName || 'video.mp4',
+            asset.uri,
+            {
+              fileName: asset.fileName,
+              fileSize: asset.fileSize,
+              duration: asset.duration,
+              isAppUser: isAppUser ?? false,
+              phoneNumber,
+              contactName,
+              email,
+              receiverUniqueCode: receiverUniqueCode,
+            },
+          ).then((sentMessage) => {
+            chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
+              chatService.notifyChatListRefresh();
+            }).catch(err => 
+              console.error('Error updating chat:', err)
+            );
+            scrollToBottom();
+          }).catch((error: any) => {
+            console.warn('Video send warning (saved locally):', error?.message);
+          });
+        }
+      });
     } catch (error) {
       console.error('Error sending video:', error);
     }
@@ -1218,6 +1233,7 @@ const ChatDetailScreen: React.FC = () => {
 
   const handleSendDocument = async () => {
     try {
+      setShowAttachmentMenu(false);
       const result = await DocumentPicker.pick({
         type: [DocumentPicker.types.allFiles],
       });
@@ -1256,6 +1272,81 @@ const ChatDetailScreen: React.FC = () => {
         console.error('Error sending document:', error);
       }
     }
+  };
+
+  const handleSendContact = async () => {
+    try {
+      setShowAttachmentMenu(false);
+      // Request contact permissions
+      const permission = await Contacts.requestPermission();
+      
+      if (permission === 'authorized') {
+        // Get all contacts
+        const allContacts = await Contacts.getAll();
+        
+        // Show contact picker
+        Alert.alert(
+          'Select Contact',
+          'Choose a contact to share',
+          [
+            {text: 'Cancel', style: 'cancel'},
+            ...allContacts.slice(0, 10).map(contact => ({
+              text: contact.displayName || contact.givenName || 'Unknown',
+              onPress: async () => {
+                const selectedContact: Contact = {
+                  id: contact.recordID || Math.random().toString(),
+                  name: contact.displayName || contact.givenName || contact.familyName || 'Unknown',
+                  phoneNumber: contact.phoneNumbers?.[0]?.number?.replace(/\s/g, ''),
+                  email: contact.emailAddresses?.[0]?.email,
+                  isAppUser: false,
+                  isInvited: false,
+                  createdAt: new Date().toISOString(),
+                };
+                
+                // Send contact as message
+                const contactContent = JSON.stringify(selectedContact);
+                chatService.sendMessage(
+                  chatId,
+                  receiverId || undefined,
+                  'contact',
+                  contactContent,
+                  undefined,
+                  {
+                    isAppUser: isAppUser ?? false,
+                    phoneNumber,
+                    contactName,
+                    email,
+                    receiverUniqueCode: receiverUniqueCode,
+                    contactData: selectedContact,
+                  },
+                ).then((sentMessage) => {
+                  chatStorageService.updateChatWithMessage(chatId, sentMessage, false).then(() => {
+                    chatService.notifyChatListRefresh();
+                  }).catch(err => 
+                    console.error('Error updating chat:', err)
+                  );
+                  scrollToBottom();
+                }).catch((error: any) => {
+                  console.warn('Contact send warning (saved locally):', error?.message);
+                });
+              },
+            })),
+          ],
+          {cancelable: true}
+        );
+      } else {
+        Alert.alert('Permission Required', 'Please grant contact permissions in Settings');
+      }
+    } catch (error) {
+      console.error('Error sending contact:', error);
+      Alert.alert('Error', 'Failed to send contact');
+    }
+  };
+
+  const handleOpenVideoPlayer = (videoUrl: string) => {
+    setCurrentVideoUrl(videoUrl);
+    setShowVideoPlayer(true);
+    setVideoPaused(false);
   };
 
   const startRecording = async () => {
@@ -1507,13 +1598,17 @@ const ChatDetailScreen: React.FC = () => {
           <TouchableOpacity 
             style={styles.videoContainer}
             onPress={() => {
-              // TODO: Open video player
-              Alert.alert('Video', 'Video playback coming soon');
-            }}>
+              const videoUrl = item.mediaUrl?.startsWith('http') 
+                ? item.mediaUrl 
+                : `https://communication-vault.onrender.com${item.mediaUrl}`;
+              handleOpenVideoPlayer(videoUrl);
+            }}
+            activeOpacity={0.8}>
             {item.thumbnailUrl ? (
               <Image 
                 source={{uri: item.thumbnailUrl}} 
                 style={styles.videoThumbnail} 
+                resizeMode="cover"
               />
             ) : (
               <View style={[styles.videoThumbnail, {backgroundColor: '#000', justifyContent: 'center', alignItems: 'center'}]}>
@@ -1521,13 +1616,64 @@ const ChatDetailScreen: React.FC = () => {
               </View>
             )}
             <View style={styles.videoOverlay}>
-              <Icon name="play-circle" size={40} color="#fff" />
+              <Icon name="play-circle" size={50} color="#fff" />
               {item.duration && (
                 <Text style={styles.videoDuration}>
                   {Math.floor(item.duration / 60)}:{(item.duration % 60).toString().padStart(2, '0')}
                 </Text>
               )}
             </View>
+          </TouchableOpacity>
+        )}
+
+        {item.type === 'contact' && item.contactData && (
+          <TouchableOpacity 
+            style={styles.contactMessage}
+            onPress={() => {
+              // Navigate to contact or show contact details
+              Alert.alert(
+                item.contactData!.name,
+                `${item.contactData!.phoneNumber || ''}\n${item.contactData!.email || ''}`,
+                [
+                  {text: 'OK', style: 'default'},
+                  item.contactData!.phoneNumber ? {
+                    text: 'Call',
+                    onPress: () => {
+                      // TODO: Implement call functionality
+                      Alert.alert('Call', `Calling ${item.contactData!.phoneNumber}...`);
+                    },
+                  } : null,
+                ].filter(Boolean) as any,
+              );
+            }}
+            activeOpacity={0.7}>
+            <View style={styles.contactIconContainer}>
+              {item.contactData.avatar ? (
+                <Image source={{uri: item.contactData.avatar}} style={styles.contactAvatar} />
+              ) : (
+                <View style={[styles.contactAvatar, styles.contactAvatarPlaceholder]}>
+                  <Icon name="person" size={24} color={isMe ? '#075E54' : '#34B7F1'} />
+                </View>
+              )}
+            </View>
+            <View style={styles.contactInfo}>
+              <Text style={[styles.contactName, isMe ? styles.myMessageText : styles.theirMessageText]}>
+                {item.contactData.name}
+              </Text>
+              {item.contactData.phoneNumber && (
+                <View style={styles.contactDetailRow}>
+                  <Icon name="call" size={12} color="#999" />
+                  <Text style={styles.contactDetail}> {item.contactData.phoneNumber}</Text>
+                </View>
+              )}
+              {item.contactData.email && (
+                <View style={styles.contactDetailRow}>
+                  <Icon name="mail" size={12} color="#999" />
+                  <Text style={styles.contactDetail}> {item.contactData.email}</Text>
+                </View>
+              )}
+            </View>
+            <Icon name="chevron-forward" size={20} color={isMe ? '#075E54' : '#34B7F1'} />
           </TouchableOpacity>
         )}
 
@@ -1827,50 +1973,129 @@ const ChatDetailScreen: React.FC = () => {
           </Text>
         </View>
       ) : (
-        <View style={styles.inputContainer}>
-          <TouchableOpacity
-            style={styles.attachButton}
-            onPress={handleSendImage}>
-            <Icon name="image" size={24} color="#2196F3" />
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.attachButton}
-            onPress={handleSendVideo}>
-            <Icon name="videocam" size={24} color="#2196F3" />
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.attachButton}
-            onPress={handleSendDocument}>
-            <Icon name="document-attach" size={24} color="#2196F3" />
-          </TouchableOpacity>
-
-          <TextInput
-            style={styles.input}
-            value={inputText}
-            onChangeText={handleTyping}
-            placeholder="Type a message..."
-            multiline
-            onSubmitEditing={handleSendText}
-          />
-
-          {inputText.trim() ? (
+        <>
+          <View style={styles.inputContainer}>
             <TouchableOpacity
-              style={styles.sendButton}
-              onPress={handleSendText}>
-              <Icon name="send" size={24} color="#fff" />
+              style={styles.attachButton}
+              onPress={() => setShowAttachmentMenu(!showAttachmentMenu)}>
+              <Icon name="add-circle" size={28} color="#075E54" />
             </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={styles.voiceButton}
-              onPressIn={startRecording}
-              onPressOut={stopRecording}>
-              <Icon name="mic" size={24} color="#2196F3" />
-            </TouchableOpacity>
+
+            <TextInput
+              style={styles.input}
+              value={inputText}
+              onChangeText={handleTyping}
+              placeholder="Type a message..."
+              placeholderTextColor="#999"
+              multiline
+              onSubmitEditing={handleSendText}
+            />
+
+            {inputText.trim() ? (
+              <TouchableOpacity
+                style={styles.sendButton}
+                onPress={handleSendText}>
+                <Icon name="send" size={22} color="#fff" />
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={styles.voiceButton}
+                onPressIn={startRecording}
+                onPressOut={stopRecording}>
+                <Icon name="mic" size={24} color="#075E54" />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Attachment Menu */}
+          {showAttachmentMenu && (
+            <View style={styles.attachmentMenu}>
+              <TouchableOpacity
+                style={styles.attachmentMenuItem}
+                onPress={() => handleSendImage(false)}>
+                <View style={[styles.attachmentIcon, {backgroundColor: '#E3F2FD'}]}>
+                  <Icon name="images" size={24} color="#2196F3" />
+                </View>
+                <Text style={styles.attachmentLabel}>Photo</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.attachmentMenuItem}
+                onPress={() => handleSendImage(true)}>
+                <View style={[styles.attachmentIcon, {backgroundColor: '#FFF3E0'}]}>
+                  <Icon name="camera" size={24} color="#FF9800" />
+                </View>
+                <Text style={styles.attachmentLabel}>Camera</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.attachmentMenuItem}
+                onPress={() => handleSendVideo(false)}>
+                <View style={[styles.attachmentIcon, {backgroundColor: '#F3E5F5'}]}>
+                  <Icon name="videocam" size={24} color="#9C27B0" />
+                </View>
+                <Text style={styles.attachmentLabel}>Video</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.attachmentMenuItem}
+                onPress={() => handleSendVideo(true)}>
+                <View style={[styles.attachmentIcon, {backgroundColor: '#E1F5FE'}]}>
+                  <Icon name="videocam-outline" size={24} color="#00BCD4" />
+                </View>
+                <Text style={styles.attachmentLabel}>Record</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.attachmentMenuItem}
+                onPress={handleSendDocument}>
+                <View style={[styles.attachmentIcon, {backgroundColor: '#E8F5E9'}]}>
+                  <Icon name="document" size={24} color="#4CAF50" />
+                </View>
+                <Text style={styles.attachmentLabel}>Document</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.attachmentMenuItem}
+                onPress={handleSendContact}>
+                <View style={[styles.attachmentIcon, {backgroundColor: '#FFF9C4'}]}>
+                  <Icon name="person" size={24} color="#FBC02D" />
+                </View>
+                <Text style={styles.attachmentLabel}>Contact</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </>
+      )}
+
+      {/* Video Player Modal */}
+      <Modal
+        visible={showVideoPlayer}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowVideoPlayer(false)}>
+        <View style={styles.videoPlayerModal}>
+          <TouchableOpacity
+            style={styles.videoPlayerClose}
+            onPress={() => setShowVideoPlayer(false)}>
+            <Icon name="close" size={30} color="#fff" />
+          </TouchableOpacity>
+          {currentVideoUrl && (
+            <Video
+              source={{uri: currentVideoUrl}}
+              style={styles.videoPlayer}
+              controls={true}
+              paused={videoPaused}
+              resizeMode="contain"
+              onError={(error) => {
+                console.error('Video playback error:', error);
+                Alert.alert('Error', 'Failed to play video');
+                setShowVideoPlayer(false);
+              }}
+            />
           )}
         </View>
-      )}
+      </Modal>
       </KeyboardAvoidingView>
 
       {/* Edit Chat Name Modal */}
@@ -2212,18 +2437,20 @@ const styles = StyleSheet.create({
     color: '#000',
   },
   messageImage: {
-    width: 200,
-    height: 200,
+    width: 250,
+    height: 250,
     borderRadius: 8,
     marginBottom: 0, // No margin between image and footer
+    maxWidth: '100%',
   },
   videoContainer: {
-    width: 200,
+    width: 250,
     height: 200,
     borderRadius: 8,
     marginBottom: 0, // No margin between video and footer
     position: 'relative',
     overflow: 'hidden',
+    backgroundColor: '#000',
   },
   videoThumbnail: {
     width: '100%',
@@ -2312,10 +2539,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F0F0',
     borderTopWidth: 1,
     borderTopColor: '#E0E0E0',
+    minHeight: 60,
   },
   attachButton: {
     padding: 8,
     marginRight: 5,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   input: {
     flex: 1,
@@ -2344,6 +2574,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     justifyContent: 'center',
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
   },
   recordingContainer: {
     flexDirection: 'row',
@@ -2412,6 +2644,96 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#999',
     fontStyle: 'italic',
+  },
+  attachmentMenu: {
+    flexDirection: 'row',
+    backgroundColor: '#fff',
+    paddingVertical: 15,
+    paddingHorizontal: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#E0E0E0',
+    justifyContent: 'space-around',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: -2},
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  attachmentMenuItem: {
+    alignItems: 'center',
+    minWidth: 70,
+  },
+  attachmentIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  attachmentLabel: {
+    fontSize: 12,
+    color: '#333',
+    marginTop: 4,
+  },
+  contactMessage: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    backgroundColor: '#F5F5F5',
+    borderRadius: 8,
+    minWidth: 200,
+    maxWidth: 280,
+  },
+  contactIconContainer: {
+    marginRight: 12,
+  },
+  contactAvatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#E0E0E0',
+  },
+  contactAvatarPlaceholder: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#E3F2FD',
+  },
+  contactInfo: {
+    flex: 1,
+  },
+  contactName: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  contactDetailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  contactDetail: {
+    fontSize: 13,
+    color: '#666',
+  },
+  videoPlayerModal: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  videoPlayerClose: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 50 : 30,
+    right: 20,
+    zIndex: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderRadius: 20,
+    padding: 8,
+  },
+  videoPlayer: {
+    width: Dimensions.get('window').width,
+    height: Dimensions.get('window').height * 0.6,
   },
 });
 

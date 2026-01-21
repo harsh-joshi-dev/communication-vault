@@ -49,13 +49,14 @@ export interface Message {
   chatId: string;
   senderId: string;
   receiverId: string;
-  type: 'text' | 'image' | 'video' | 'voice' | 'document';
+  type: 'text' | 'image' | 'video' | 'voice' | 'document' | 'contact';
   content: string;
   mediaUrl?: string;
   thumbnailUrl?: string;
   duration?: number;
   fileSize?: number;
   fileName?: string;
+  contactData?: Contact; // For contact messages
   isViewOnce: boolean;
   autoDeleteAfter?: number; // hours
   isDeleted: boolean;

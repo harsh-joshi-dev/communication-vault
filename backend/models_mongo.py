@@ -146,13 +146,14 @@ class Message(Document):
     receiver_name = StringField()
     
     # Message content
-    type = StringField(required=True)  # text, image, video, voice, document
+    type = StringField(required=True)  # text, image, video, voice, document, contact
     content = StringField()
     media_url = StringField()
     thumbnail_url = StringField()
     file_name = StringField()
     file_size = IntField()  # in bytes
     duration = IntField()  # for voice/video, in seconds
+    contact_data = StringField()  # JSON string for contact messages
     
     # Privacy features
     is_view_once = BooleanField(default=False)
@@ -170,7 +171,7 @@ class Message(Document):
     
     def to_dict(self):
         """Convert to dictionary"""
-        return {
+        result = {
             'id': str(self.id),
             'chatId': self.chat_id,
             'senderId': self.sender_id,
@@ -193,6 +194,14 @@ class Message(Document):
             'readAt': self.read_at.isoformat() if self.read_at else None,
             'createdAt': self.created_at.isoformat() if self.created_at else None,
         }
+        # Parse contact_data if it exists
+        if self.contact_data:
+            try:
+                import json
+                result['contactData'] = json.loads(self.contact_data)
+            except:
+                result['contactData'] = self.contact_data
+        return result
 
 class Contact(Document):
     """Contact model for app contacts"""

@@ -256,6 +256,7 @@ def register_socket_handlers(socketio_instance):
             is_view_once = data.get('isViewOnce', False)
             auto_delete_after = data.get('autoDeleteAfter')
             thumbnail_url = data.get('thumbnailUrl')
+            contact_data = data.get('contactData')  # For contact messages
             
             # CRITICAL: Create message dict and save to MongoDB FIRST
             # Then deliver via socket (ensures persistence even if socket fails)
@@ -286,6 +287,22 @@ def register_socket_handlers(socketio_instance):
                 'sentAt': datetime.utcnow().isoformat(),
                 'createdAt': datetime.utcnow().isoformat(),
             }
+            
+            # Add contact_data if it's a contact message
+            if message_type == 'contact' and contact_data:
+                if isinstance(contact_data, str):
+                    message_dict['contactData'] = contact_data
+                else:
+                    import json
+                    message_dict['contactData'] = json.dumps(contact_data) if contact_data else None
+            elif message_type == 'contact' and content:
+                # If contact_data not provided but content is JSON, use content
+                try:
+                    import json
+                    parsed = json.loads(content)
+                    message_dict['contactData'] = parsed
+                except:
+                    pass
             
             # MongoDB save DISABLED - using pure socket.io communication only
             # Messages are delivered in real-time via socket, no database persistence needed

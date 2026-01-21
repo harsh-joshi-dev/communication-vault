@@ -1,6 +1,6 @@
 import {io, Socket} from 'socket.io-client';
 import {Platform} from 'react-native';
-import {Message, Chat} from '../types';
+import {Message, Chat, Contact} from '../types';
 import {uuidv4} from '../utils/uuid';
 import {mediaService} from './MediaService';
 import {deviceService} from './DeviceService';
@@ -299,6 +299,22 @@ class ChatService {
     }
     try {
       console.log('📥 RECEIVED NEW MESSAGE!', { id: rawId, chatId: messageData.chatId || messageData.chat_id, senderId: messageData.senderId || messageData.sender_id, receiverId: messageData.receiverId || messageData.receiver_id });
+      // Parse contact data if it's a contact message
+      let contactData: any = undefined;
+      if (messageData.type === 'contact' || messageData.type === 'contact') {
+        try {
+          if (messageData.contactData) {
+            contactData = typeof messageData.contactData === 'string' 
+              ? JSON.parse(messageData.contactData) 
+              : messageData.contactData;
+          } else if (messageData.content) {
+            contactData = JSON.parse(messageData.content);
+          }
+        } catch (e) {
+          console.error('Error parsing contact data:', e);
+        }
+      }
+
       const message: Message = {
         id: messageData.id || messageData._id || uuidv4(),
         chatId: messageData.chatId || messageData.chat_id,
@@ -311,6 +327,7 @@ class ChatService {
         fileName: messageData.fileName || messageData.file_name,
         fileSize: messageData.fileSize || messageData.file_size,
         duration: messageData.duration,
+        contactData: contactData,
         isViewOnce: messageData.isViewOnce || messageData.is_view_once || false,
         autoDeleteAfter: messageData.autoDeleteAfter || messageData.auto_delete_after,
         isDeleted: messageData.isDeleted || messageData.is_deleted || false,
@@ -758,6 +775,7 @@ class ChatService {
       fileSize?: number;
       duration?: number;
       receiverUniqueCode?: string;
+      contactData?: Contact;
     },
   ): Promise<Message> {
     // Upload media if provided
@@ -795,6 +813,18 @@ class ChatService {
     // Always use format: chat_<deviceId> for consistency
     const normalizedChatId = chatId.startsWith('chat_') ? chatId : `chat_${chatId}`;
 
+    // Parse contact data if it's a contact message
+    let contactData: any = undefined;
+    if (type === 'contact' && options?.contactData) {
+      contactData = options.contactData;
+    } else if (type === 'contact' && content) {
+      try {
+        contactData = JSON.parse(content);
+      } catch (e) {
+        console.error('Error parsing contact content:', e);
+      }
+    }
+
     // Create optimistic message
     const message: Message = {
       id: uuidv4(),
@@ -808,6 +838,7 @@ class ChatService {
       fileName,
       fileSize,
       duration: options?.duration,
+      contactData: contactData,
       isViewOnce: options?.isViewOnce || false,
       autoDeleteAfter: options?.autoDeleteAfter,
       isDeleted: false,
@@ -856,6 +887,7 @@ class ChatService {
       phoneNumber: options?.phoneNumber,
       contactName: options?.contactName,
       email: options?.email,
+      contactData: options?.contactData ? JSON.stringify(options.contactData) : undefined,
     };
 
     // Resolve immediately - message is already saved and chat updated
