@@ -36,22 +36,12 @@ class ChatService {
   }
 
   async connect(): Promise<void> {
-    // If already connected and authenticated, verify connection is still valid
+    // CRITICAL: Check if already connected and authenticated - STABLE CONNECTION CHECK
+    // Don't over-check - trust socket.io's connection state to prevent unnecessary reconnections
     if (this.socket?.connected && this.isAuthenticated && this.socket.id) {
-      // Double-check connection is still alive by checking socket state
-      if (this.socket.io && this.socket.io.engine && this.socket.io.engine.readyState === 'open') {
-        return Promise.resolve();
-      } else {
-        // Socket exists but not truly connected - force reconnect
-        console.log('⚠️ Socket appears connected but not alive, forcing reconnect...');
-        if (this.socket) {
-          this.socket.removeAllListeners();
-          this.socket.disconnect();
-          this.socket = null;
-        }
-        this.isAuthenticated = false;
-        this.connectionPromise = null;
-      }
+      // Simple check - if socket says connected and authenticated, trust it
+      // Don't check readyState aggressively - this causes false disconnections and instability
+      return Promise.resolve();
     }
 
     // If connection is in progress, wait for it
@@ -59,9 +49,9 @@ class ChatService {
       return this.connectionPromise;
     }
 
-    const maxAttempts = 4;
-    const authTimeoutMs = 45000; // Reduced from 90s to 45s for faster feedback
-    const retryDelayMs = 2000; // Reduced from 5s to 2s for faster reconnection
+    const maxAttempts = 5; // More attempts for better reliability
+    const authTimeoutMs = 30000; // 30s timeout - give more time for connection
+    const retryDelayMs = 2000; // 2s retry delay - reasonable retry interval
 
     this.connectionPromise = (async () => {
       let deviceInfo: {deviceId: string; uniqueCode: string; deviceName: string};
@@ -107,22 +97,56 @@ class ChatService {
     authTimeoutMs: number,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
+      // CRITICAL: Only create new socket if current one is truly dead
+      // Don't disconnect working connections - this causes instability
       if (this.socket) {
-        this.socket.removeAllListeners();
-        this.socket.disconnect();
-        this.socket = null;
+        // Only cleanup if socket is truly dead (not just reporting as disconnected)
+        const engineState = this.socket.io?.engine?.readyState;
+        const isTrulyDead = !this.socket.connected && 
+                           engineState !== 'connecting' &&
+                           engineState !== 'opening';
+        if (isTrulyDead) {
+          console.log('🔄 Cleaning up dead socket before reconnecting...');
+          try {
+            this.socket.removeAllListeners();
+            this.socket.disconnect();
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+          this.socket = null;
+          this.isAuthenticated = false;
+        } else if (this.socket.connected && this.isAuthenticated) {
+          // Socket is already good - resolve immediately (STABLE CONNECTION)
+          console.log('✅ Socket already connected and authenticated - reusing existing connection');
+          resolve();
+          return;
+        } else if (this.socket.connected) {
+          // Socket connected but not authenticated yet - wait for authentication
+          console.log('⏳ Socket connected but not authenticated yet, waiting...');
+          const authCheck = setInterval(() => {
+            if (this.isAuthenticated) {
+              clearInterval(authCheck);
+              resolve();
+            }
+            // Timeout after 10 seconds
+            setTimeout(() => clearInterval(authCheck), 10000);
+          }, 100);
+          return;
+        }
       }
-      this.isAuthenticated = false;
 
+      // Create new socket connection
+      console.log('🔌 Creating new socket connection...');
       const socket = io(apiUrl, {
         auth: { deviceId: deviceInfo.deviceId, uniqueCode: deviceInfo.uniqueCode, deviceName: deviceInfo.deviceName },
-        transports: ['polling', 'websocket'],
-        reconnection: true,
-        reconnectionAttempts: Infinity,
-        reconnectionDelay: 500, // Faster initial reconnection (500ms instead of 1000ms)
-        reconnectionDelayMax: 5000, // Faster max reconnection delay (5s instead of 8s)
-        timeout: 30000, // Faster timeout (30s instead of 45s)
-        forceNew: true,
+        transports: ['websocket', 'polling'], // WebSocket first for better performance
+        reconnection: true, // CRITICAL: Enable automatic reconnection
+        reconnectionAttempts: Infinity, // Keep trying forever
+        reconnectionDelay: 1000, // Start with 1s delay
+        reconnectionDelayMax: 5000, // Max 5s delay
+        timeout: 20000, // 20s timeout
+        forceNew: false, // CRITICAL: Reuse existing connection - this prevents connection instability
+        autoConnect: true,
       });
       this.socket = socket;
 
@@ -140,72 +164,122 @@ class ChatService {
       socket.on('connected', (data: any) => {
         if (timer) { clearTimeout(timer); timer = null; }
         this.isAuthenticated = true;
-        console.log('✅ Authenticated');
+        console.log('✅ Authenticated successfully');
+        
+        // CRITICAL: Join device and code rooms immediately after authentication
         if (socket.connected) {
           const did = data.deviceId || deviceInfo.deviceId;
           const code = data.uniqueCode || deviceInfo.uniqueCode;
+          
+          // Join device room
           socket.emit('join_chat', {chatId: `device_${did}`});
-          if (code) socket.emit('join_chat', {chatId: `code_${code}`});
-          console.log('✅ Joined device and code rooms');
+          console.log(`✅ Joined device room: device_${did}`);
+          
+          // Join code room if available
+          if (code) {
+            socket.emit('join_chat', {chatId: `code_${code}`});
+            console.log(`✅ Joined code room: code_${code}`);
+          }
+          
+          console.log('✅ Successfully joined all required rooms');
         }
+        
         // Fetch pending messages immediately after connecting (CRITICAL for receiver device)
-        console.log('📥 Fetching pending messages immediately after connection...');
+        // Don't block on this - resolve immediately so connection is marked as ready
         this.fetchPendingMessages().then(() => {
           console.log('✅ Pending messages fetched after connection');
         }).catch(() => {
-          console.log('⚠️ Pending messages fetch failed after connection');
+          console.log('⚠️ Pending messages fetch failed after connection (non-critical)');
         });
+        
+        // Resolve connection promise - connection is ready
         resolve();
       });
 
-      socket.on('connect_error', () => {
-        if (timer) { clearTimeout(timer); timer = null; }
-        socket.removeAllListeners();
-        socket.disconnect();
-        if (this.socket === socket) this.socket = null;
-        this.isAuthenticated = false;
-        reject(new Error('Connect error'));
+      socket.on('connect_error', (error: Error) => {
+        console.log('⚠️ Socket connect_error:', error.message);
+        // CRITICAL: Don't reject immediately - socket.io will auto-reconnect
+        // Only reject if this is the first attempt and we have a timer
+        // For subsequent attempts, let socket.io handle reconnection automatically
+        if (timer) {
+          // First connection attempt failed - clear timer but don't reject yet
+          // Let socket.io's auto-reconnection handle it
+          clearTimeout(timer);
+          timer = null;
+          
+          // Only reject if it's a critical error that won't auto-recover
+          // For network errors, socket.io will keep trying
+          if (error.message && (error.message.includes('xhr poll error') || error.message.includes('timeout'))) {
+            // These are recoverable - socket.io will retry
+            console.log('ℹ️ Network error, socket.io will auto-reconnect...');
+            // Don't reject - let socket.io handle reconnection
+            // The promise will resolve when 'connected' event fires
+          } else {
+            // Other errors might be critical
+            console.log('⚠️ Connection error, will retry...');
+            // Still don't reject - let socket.io handle it
+          }
+        }
+        // Don't remove listeners or disconnect - let socket.io handle reconnection
       });
 
       socket.on('disconnect', (reason: string) => {
         console.log('⚠️ Socket disconnected:', reason);
         this.isAuthenticated = false;
-        // Auto-reconnect for certain disconnect reasons
-        if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'transport error') {
-          console.log('🔄 Attempting auto-reconnect...');
-          setTimeout(() => {
-            if (!this.socket?.connected) {
-              socket.connect();
-            }
-          }, 1000);
+        
+        // CRITICAL: Don't manually reconnect - let socket.io handle it automatically
+        // Socket.io will auto-reconnect if reconnection: true and reconnectionAttempts: Infinity
+        // Manual reconnection can cause conflicts and instability
+        
+        // Only handle server-initiated disconnects (server closed connection)
+        if (reason === 'io server disconnect') {
+          console.log('🔄 Server closed connection, will auto-reconnect...');
+          // Socket.io will handle reconnection automatically
+          this.connectionPromise = null; // Reset so new connection can be initiated if needed
+        } else {
+          // Transport errors, client disconnects - socket.io handles automatically
+          console.log('ℹ️ Connection lost, socket.io will auto-reconnect...');
         }
       });
       
-      // Handle reconnection events
+      // Handle reconnection events - CRITICAL for stable connection
       socket.on('reconnect', (attemptNumber: number) => {
         console.log(`✅ Socket reconnected after ${attemptNumber} attempts`);
-        // Re-authenticate and re-join rooms after reconnection
-        if (socket.connected) {
-          const did = deviceInfo.deviceId;
-          const code = deviceInfo.uniqueCode;
-          socket.emit('join_chat', {chatId: `device_${did}`});
-          if (code) socket.emit('join_chat', {chatId: `code_${code}`});
-          console.log('✅ Rejoined device and code rooms after reconnect');
-        }
+        // After reconnection, need to re-authenticate
+        // The 'connected' event will be emitted again, which sets isAuthenticated
+        // But we need to manually re-join rooms since authentication might have changed
+        
+        // Wait a bit for authentication to complete, then rejoin rooms
+        setTimeout(() => {
+          if (socket.connected) {
+            const did = deviceInfo.deviceId;
+            const code = deviceInfo.uniqueCode;
+            socket.emit('join_chat', {chatId: `device_${did}`});
+            if (code) socket.emit('join_chat', {chatId: `code_${code}`});
+            console.log('✅ Rejoined device and code rooms after reconnect');
+            
+            // Re-fetch pending messages after reconnection
+            this.fetchPendingMessages().catch(() => {});
+          }
+        }, 500);
       });
       
       socket.on('reconnect_attempt', (attemptNumber: number) => {
-        console.log(`🔄 Reconnection attempt ${attemptNumber}`);
+        console.log(`🔄 Reconnection attempt ${attemptNumber} - socket.io handling automatically`);
       });
       
       socket.on('reconnect_error', (error: Error) => {
-        console.warn('⚠️ Reconnection error:', error.message);
+        // Don't spam logs - socket.io will keep trying
+        if (error.message && !error.message.includes('xhr poll error')) {
+          console.warn('⚠️ Reconnection error:', error.message);
+        }
       });
       
       socket.on('reconnect_failed', () => {
-        console.error('❌ Reconnection failed - will try manual reconnect');
+        console.error('❌ Socket.io reconnection failed after all attempts');
         // Reset connection state to allow manual reconnect
         this.connectionPromise = null;
+        this.isAuthenticated = false;
       });
 
       this.setupEventListeners();
@@ -536,6 +610,30 @@ class ChatService {
       }
     });
 
+    // Handle chat creation request (when someone scans your QR code)
+    this.socket.on('create_chat', async (data: {deviceId: string; deviceName: string; uniqueCode: string}) => {
+      console.log('📨 Socket create_chat event received:', data);
+      try {
+        const {chatStorageService} = await import('./ChatStorageService');
+        // Auto-create chat on this side when other person scans QR
+        const chat = await chatStorageService.getOrCreateChat(
+          data.deviceId,
+          data.deviceName || 'Unknown User',
+          data.uniqueCode
+        );
+        console.log('✅ Chat auto-created on receiver side:', chat.id);
+        // Notify chat list to refresh
+        this.notifyChatListRefresh();
+        this.chatListeners.forEach(l => { 
+          try { 
+            l(chat); 
+          } catch (e) {} 
+        });
+      } catch (error) {
+        console.error('❌ Error creating chat from socket event:', error);
+      }
+    });
+
     this.socket.on('new_message', async (messageData: any) => {
       console.log('📨 Socket new_message event received:', {
         id: messageData?.id || messageData?._id,
@@ -693,10 +791,14 @@ class ChatService {
     // Get device info
     const deviceInfo = await deviceService.getDeviceInfo();
 
+    // CRITICAL: Normalize chatId to ensure consistency
+    // Always use format: chat_<deviceId> for consistency
+    const normalizedChatId = chatId.startsWith('chat_') ? chatId : `chat_${chatId}`;
+
     // Create optimistic message
     const message: Message = {
       id: uuidv4(),
-      chatId,
+      chatId: normalizedChatId, // Use normalized chatId
       senderId: deviceInfo.deviceId,
       receiverId: receiverId || '',
       type,
@@ -714,14 +816,15 @@ class ChatService {
       createdAt: new Date().toISOString(),
     };
 
-    // Save locally immediately (ALWAYS succeeds)
+    // Save locally immediately (ALWAYS succeeds) - use normalized chatId
     await messageStorageService.saveMessage(message);
-    console.log('✅ Message saved locally:', message.id);
+    console.log('✅ Message saved locally:', message.id, 'chatId:', normalizedChatId);
 
     // Update chat immediately so it appears in chat list (CRITICAL - must happen before socket send)
+    // Use normalized chatId for consistency
     try {
       const {chatStorageService} = await import('./ChatStorageService');
-      await chatStorageService.updateChatWithMessage(chatId, message, false);
+      await chatStorageService.updateChatWithMessage(normalizedChatId, message, false);
       console.log('✅ Chat updated immediately - should appear in chat list');
       // Notify chat list immediately (CRITICAL for new chats)
       this.notifyChatListRefresh();
@@ -736,9 +839,9 @@ class ChatService {
       this.notifyChatListRefresh();
     }
 
-    // Prepare message data
+    // Prepare message data - use normalized chatId
     const messageData: any = {
-      chatId,
+      chatId: normalizedChatId, // Use normalized chatId
       receiverId,
       receiverUniqueCode: options?.receiverUniqueCode,
       type,
@@ -758,50 +861,42 @@ class ChatService {
     // Resolve immediately - message is already saved and chat updated
     // Then try to send via socket in background (non-blocking)
     const sendPromise = (async () => {
-      // Try to connect if not connected - AGGRESSIVE reconnection for sendMessage
-      // Also verify connection is truly alive, not just reported as connected
-      let isConnected = this.socket?.connected && 
-                       this.isAuthenticated && 
-                       this.socket.io?.engine?.readyState === 'open';
+      // CRITICAL: Simple connection check - trust socket.io's state for stability
+      // Don't over-check readyState - it causes false disconnections and connection instability
+      let isConnected = this.socket?.connected && this.isAuthenticated;
+      
       if (!isConnected) {
         try {
-          // Force reset connection state for aggressive reconnection
-          if (this.socket && (!this.socket.connected || !this.isAuthenticated)) {
-            console.log('🔄 Force resetting connection state for immediate reconnect...');
-            this.socket.removeAllListeners();
-            this.socket.disconnect();
-            this.socket = null;
-            this.isAuthenticated = false;
-            this.connectionPromise = null;
-          }
-          
-          // Give connection 5 seconds max for aggressive reconnection when sending
-          // This is longer because we want to ensure connection succeeds when user sends message
+          console.log('🔄 Socket not connected for message send, connecting...');
+          // Give connection 3 seconds to establish
+          // Message is already saved locally, so socket send is non-critical
           await Promise.race([
             this.connect(),
-            new Promise(resolve => setTimeout(resolve, 5000))
+            new Promise(resolve => setTimeout(resolve, 3000))
           ]);
-          // Double-check connection is truly alive after connect
-          isConnected = this.socket?.connected && 
-                       this.isAuthenticated && 
-                       this.socket.io?.engine?.readyState === 'open';
+          
+          // Simple check - trust socket.io's connection state
+          isConnected = this.socket?.connected && this.isAuthenticated;
           
           if (isConnected) {
-            console.log('✅ Aggressively reconnected for message sending');
+            console.log('✅ Connected for message sending');
+          } else {
+            console.log('⚠️ Connection not ready - message saved locally, will sync when connected');
           }
-        } catch {
+        } catch (error) {
+          console.log('⚠️ Connection error - message saved locally:', error);
           isConnected = false;
-          // Continue anyway - message is already saved locally
+          // Continue - message already saved locally, will sync when connected
         }
       }
 
       // Send message via socket if connected
-      if (isConnected && this.socket?.connected && this.isAuthenticated) {
-        console.log('📤 Sending message via socket:', {
-          chatId, 
-          type, 
-          contentLength: content.length,
-          receiverId: receiverId,
+          if (isConnected && this.socket?.connected && this.isAuthenticated) {
+            console.log('📤 Sending message via socket:', {
+              chatId: normalizedChatId, // Use normalized chatId
+              type, 
+              contentLength: content.length,
+              receiverId: receiverId,
           receiverUniqueCode: options?.receiverUniqueCode,
         });
         
@@ -810,9 +905,10 @@ class ChatService {
           // Message already saved, just update status
           try {
             message.status = 'sent';
+            message.chatId = normalizedChatId; // Ensure normalized chatId
             await messageStorageService.saveMessage(message);
             const {chatStorageService} = await import('./ChatStorageService');
-            await chatStorageService.updateChatWithMessage(chatId, message, false);
+            await chatStorageService.updateChatWithMessage(normalizedChatId, message, false);
             this.notifyChatListRefresh();
           } catch (e) {}
         }, 15000);
@@ -823,9 +919,10 @@ class ChatService {
           if (response?.error) {
             console.log('⚠️ Server error (message already saved):', response.error);
             message.status = 'pending';
+            message.chatId = normalizedChatId; // Ensure normalized chatId
             await messageStorageService.saveMessage(message);
             const {chatStorageService} = await import('./ChatStorageService');
-            await chatStorageService.updateChatWithMessage(chatId, message, false);
+            await chatStorageService.updateChatWithMessage(normalizedChatId, message, false);
             this.notifyChatListRefresh();
             return;
           }
@@ -845,31 +942,32 @@ class ChatService {
             };
             
             // Replace optimistic message with server message
-            const cur = await messageStorageService.getMessages(serverMessage.chatId || chatId);
+            const cur = await messageStorageService.getMessages(serverMessage.chatId || normalizedChatId);
             const without = cur.filter(m => (m.id || (m as any)._id) !== message.id);
             const idx = without.findIndex(m => (m.id || (m as any)._id) === serverMessage.id);
             const toSave = idx >= 0
               ? without.map((m, i) => (i === idx ? serverMessage : m))
               : [...without, serverMessage];
-            await messageStorageService.saveMessages(serverMessage.chatId || chatId, toSave);
+            await messageStorageService.saveMessages(serverMessage.chatId || normalizedChatId, toSave);
             
             const {chatStorageService} = await import('./ChatStorageService');
-            if (serverMessage.chatId !== chatId) {
+            if (serverMessage.chatId !== normalizedChatId) {
               try {
-                await chatStorageService.updateChatId(chatId, serverMessage.chatId);
+                await chatStorageService.updateChatId(normalizedChatId, serverMessage.chatId);
               } catch (e) {}
             }
-            await chatStorageService.updateChatWithMessage(serverMessage.chatId || chatId, serverMessage, false);
+            await chatStorageService.updateChatWithMessage(serverMessage.chatId || normalizedChatId, serverMessage, false);
             await this.joinChat(serverMessage.chatId || chatId);
             this.notifyChatListRefresh();
           } else {
             // Server responded but no message - assume success
             console.log('✅ Server confirmed (no message data), assuming success');
             message.status = 'sent';
+            message.chatId = normalizedChatId; // Ensure normalized chatId
             await messageStorageService.saveMessage(message);
-            await this.joinChat(chatId);
+            await this.joinChat(normalizedChatId);
             const {chatStorageService} = await import('./ChatStorageService');
-            await chatStorageService.updateChatWithMessage(chatId, message, false);
+            await chatStorageService.updateChatWithMessage(normalizedChatId, message, false);
             this.notifyChatListRefresh();
           }
         });
@@ -877,6 +975,8 @@ class ChatService {
         // Socket not connected - message already saved, will sync later
         console.log('📤 Message saved locally (socket not connected, will sync when connected)');
         message.status = 'pending';
+        // Use normalized chatId when saving
+        message.chatId = normalizedChatId;
         await messageStorageService.saveMessage(message);
         // Try to connect in background for future messages
         this.connect().catch(() => {});
@@ -885,7 +985,8 @@ class ChatService {
 
     // Don't wait for socket send - resolve immediately
     // Message is already saved and chat updated
-    return Promise.resolve(message);
+    // Return message with normalized chatId
+    return Promise.resolve({...message, chatId: normalizedChatId});
   }
 
   async createChat(params: {
@@ -893,16 +994,19 @@ class ChatService {
     phoneNumber?: string;
     contactName?: string;
     contactEmail?: string;
+    deviceId?: string;
+    uniqueCode?: string;
   }): Promise<Chat> {
-    const chatId = params.userId ? `chat_${params.userId}` : `chat_${params.phoneNumber}`;
+    const chatId = params.userId ? `chat_${params.userId}` : params.deviceId ? `chat_${params.deviceId}` : `chat_${params.phoneNumber}`;
     
     const chat: Chat = {
       id: chatId,
-      participantIds: params.userId ? [params.userId] : [],
+      participantIds: params.userId ? [params.userId] : params.deviceId ? [params.deviceId] : [],
       otherUser: params.userId ? undefined : {
-        id: undefined,
+        id: params.deviceId,
         name: params.contactName || 'Unknown User',
-        isAppUser: false,
+        uniqueCode: params.uniqueCode,
+        isAppUser: !!params.deviceId,
       },
       lastMessage: undefined,
       unreadCount: 0,
@@ -912,6 +1016,28 @@ class ChatService {
     };
     
     return chat;
+  }
+
+  /**
+   * Notify other device to create chat (when QR code is scanned)
+   */
+  async notifyCreateChat(deviceId: string, deviceName: string, uniqueCode: string): Promise<void> {
+    if (this.socket?.connected && this.isAuthenticated) {
+      try {
+        console.log('📤 Notifying other device to create chat:', {deviceId, deviceName, uniqueCode});
+        // Emit to the other device's room
+        this.socket.emit('create_chat', {
+          deviceId,
+          deviceName,
+          uniqueCode,
+        });
+        console.log('✅ Create chat notification sent');
+      } catch (error) {
+        console.error('❌ Error notifying create chat:', error);
+      }
+    } else {
+      console.log('⚠️ Cannot notify create chat - socket not connected');
+    }
   }
 
   async markAsRead(chatId: string, messageIds: string[]): Promise<void> {
@@ -929,40 +1055,40 @@ class ChatService {
   }
 
   async joinChat(chatId: string): Promise<void> {
-    // Verify connection is actually alive before joining
-    if (this.socket?.connected && this.isAuthenticated && this.socket.io?.engine?.readyState === 'open') {
+    // CRITICAL: Simple connection check - don't over-check readyState
+    // If socket says connected and authenticated, trust it for stability
+    if (this.socket?.connected && this.isAuthenticated) {
       try {
         console.log('📥 Joining chat room:', chatId);
         this.socket.emit('join_chat', {chatId});
         return;
       } catch (error) {
-        console.warn('⚠️ Error joining chat, will reconnect:', error);
-        // Connection might be stale - force reconnect
-        if (this.socket) {
-          this.socket.removeAllListeners();
-          this.socket.disconnect();
-          this.socket = null;
-        }
-        this.isAuthenticated = false;
-        this.connectionPromise = null;
+        console.warn('⚠️ Error joining chat:', error);
+        // Error joining - will retry after connection
       }
     }
     
-    // Socket not connected - try to connect first, but don't throw error
+    // Socket not connected - connect first
     try {
       await this.connect();
       if (this.socket?.connected && this.isAuthenticated) {
         console.log('📥 Joining chat room after connection:', chatId);
         this.socket.emit('join_chat', {chatId});
       } else {
-        // Connection failed or still not authenticated - will retry later
-        // Don't log as error, just info - it will retry when socket connects
         console.log('📥 Chat room join queued (socket connecting):', chatId);
+        // Retry join after authentication completes
+        const retryJoin = setInterval(() => {
+          if (this.socket?.connected && this.isAuthenticated) {
+            clearInterval(retryJoin);
+            this.socket.emit('join_chat', {chatId});
+            console.log('📥 Retried join chat room:', chatId);
+          }
+        }, 500);
+        // Clear after 10 seconds
+        setTimeout(() => clearInterval(retryJoin), 10000);
       }
     } catch (error) {
-      // Connection failed - don't throw, just log
-      // Messages will still work via pending fetch
-      console.log('📥 Chat room join queued (connection failed, will retry):', chatId);
+      console.log('📥 Chat room join failed (will retry when connected):', chatId);
     }
   }
 

@@ -68,21 +68,37 @@ const QRScannerScreen: React.FC = () => {
         return;
       }
 
-      // Import chat storage service
+      // Import services
       const {chatStorageService} = await import('../../services/ChatStorageService');
+      const {chatService} = await import('../../services/ChatService');
       
-      // Create or get chat (like WhatsApp - directly creates chat, not contact)
-      // Use "Unknown User" as default name until user edits it
+      // Create or get chat on THIS side (scanner side)
       const chat = await chatStorageService.getOrCreateChat(
         data.deviceId,
-        'Unknown User', // Default name
+        data.deviceName || 'Unknown User',
         data.uniqueCode
       );
+      console.log('✅ Chat created on scanner side:', chat.id);
+
+      // CRITICAL: Notify the OTHER device to also create the chat
+      // This ensures chat appears on both sides automatically
+      try {
+        await chatService.connect(); // Ensure connected
+        await chatService.notifyCreateChat(
+          data.deviceId,
+          data.deviceName || 'Unknown User',
+          data.uniqueCode
+        );
+        console.log('✅ Notified other device to create chat');
+      } catch (error) {
+        console.error('⚠️ Failed to notify other device (non-critical):', error);
+        // Continue anyway - chat is created on this side
+      }
 
       // Navigate directly to chat screen (like WhatsApp)
       (navigation as any).navigate('ChatDetail', {
         chatId: chat.id,
-        contactName: 'Unknown User', // Default name
+        contactName: data.deviceName || 'Unknown User',
         receiverId: data.deviceId,
         receiverUniqueCode: data.uniqueCode,
         isAppUser: true,

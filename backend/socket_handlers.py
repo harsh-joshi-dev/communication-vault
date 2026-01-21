@@ -576,6 +576,52 @@ def register_socket_handlers(socketio_instance):
         except Exception as e:
             print(f"Delete message error: {e}")
 
+    @socketio_instance.on('create_chat')
+    def handle_create_chat(data):
+        """Handle chat creation request - notify other device to create chat"""
+        try:
+            from flask import request
+            session_data = device_sessions.get(request.sid, {})
+            sender_device_id = session_data.get('device_id') or getattr(request, 'sid_device_id', None)
+            
+            if not sender_device_id:
+                print("⚠️ Create chat failed: sender device_id not found")
+                return
+            
+            # Get target device info from data
+            target_device_id = data.get('deviceId')
+            target_device_name = data.get('deviceName', 'Unknown User')
+            target_unique_code = data.get('uniqueCode')
+            
+            if not target_device_id:
+                print("⚠️ Create chat failed: target deviceId not provided")
+                return
+            
+            print(f"📨 Create chat request: {sender_device_id} wants to create chat with {target_device_id}")
+            
+            # Emit create_chat event to the target device's rooms
+            # Try device room first
+            socketio_instance.emit('create_chat', {
+                'deviceId': sender_device_id,
+                'deviceName': session_data.get('device_name') or getattr(request, 'sid_device_name', 'Unknown User'),
+                'uniqueCode': session_data.get('unique_code') or getattr(request, 'sid_unique_code', None)
+            }, room=f'device_{target_device_id}')
+            
+            # Also try code room if available
+            if target_unique_code:
+                socketio_instance.emit('create_chat', {
+                    'deviceId': sender_device_id,
+                    'deviceName': session_data.get('device_name') or getattr(request, 'sid_device_name', 'Unknown User'),
+                    'uniqueCode': session_data.get('unique_code') or getattr(request, 'sid_unique_code', None)
+                }, room=f'code_{target_unique_code}')
+            
+            print(f"✅ Create chat notification sent to device {target_device_id}")
+            
+        except Exception as e:
+            print(f"❌ Error handling create_chat: {e}")
+            import traceback
+            traceback.print_exc()
+
     @socketio_instance.on('delete_chat_for_everyone')
     def handle_delete_chat_for_everyone(data):
         """Notify the other participant to delete the chat locally (both ends)."""
