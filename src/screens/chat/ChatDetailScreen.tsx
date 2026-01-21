@@ -54,11 +54,13 @@ const ChatDetailScreen: React.FC = () => {
   const [chatName, setChatName] = useState<string>(contactName); // Chat name (can be edited)
   const [isEditingName, setIsEditingName] = useState(false);
   const [editNameText, setEditNameText] = useState<string>('');
+  const [chatCreatedAt, setChatCreatedAt] = useState<string | null>(null); // Chat creation timestamp
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const flatListRef = useRef<FlatList>(null);
   const audioRecorderPlayer = useRef(new AudioRecorderPlayer()).current;
+  const messageUnsubscribeRef = useRef<(() => void) | null>(null); // Store message listener unsubscribe function
 
   // Handle app state changes to reconnect when app comes back from background
   useEffect(() => {
@@ -117,6 +119,18 @@ const ChatDetailScreen: React.FC = () => {
   // Reload messages and chat name when screen comes into focus (like WhatsApp)
   useFocusEffect(
     React.useCallback(() => {
+      // CRITICAL: Re-setup message listener when screen comes into focus
+      // This ensures messages are received when navigating back to the screen
+      if (messageUnsubscribeRef.current) {
+        console.log('🔄 Cleaning up old message listener before re-setup...');
+        messageUnsubscribeRef.current();
+        messageUnsubscribeRef.current = null;
+      }
+      
+      // Setup message listener immediately
+      console.log('📨 Setting up message listener on screen focus...');
+      messageUnsubscribeRef.current = setupMessageListener();
+      
       // Load messages and chat name immediately
       loadMessages();
       loadChatName();
@@ -137,6 +151,8 @@ const ChatDetailScreen: React.FC = () => {
       
       chatService.connect().then(() => {
         console.log('✅ Connected when screen focused');
+        setupTypingListener();
+        setupStatusUpdateListener();
         // Join chat after connection is established
         chatService.joinChat(chatId).then(() => {
           console.log('✅ Joined chat when screen focused');
@@ -159,11 +175,15 @@ const ChatDetailScreen: React.FC = () => {
         // Immediate retry
         setTimeout(() => {
           chatService.connect().then(() => {
+            setupTypingListener();
+            setupStatusUpdateListener();
             chatService.joinChat(chatId).catch(() => {});
           }).catch(() => {
             // Second retry after delay
             setTimeout(() => {
               chatService.connect().then(() => {
+                setupTypingListener();
+                setupStatusUpdateListener();
                 chatService.joinChat(chatId).catch(() => {});
               }).catch(() => {});
             }, 1000);
@@ -196,6 +216,8 @@ const ChatDetailScreen: React.FC = () => {
       return () => { 
         clearInterval(pendingInterval);
         clearInterval(reloadInterval);
+        // Don't cleanup message listener here - it will be cleaned up in useEffect cleanup
+        // We want the listener to persist while screen is focused
       };
     }, [chatId])
   );
@@ -225,7 +247,11 @@ const ChatDetailScreen: React.FC = () => {
   useEffect(() => {
     deviceService.getDeviceId().then(id => setCurrentDeviceId(id));
     loadMessages();
-    const messageUnsubscribe = setupMessageListener();
+    
+    // Setup message listener on mount
+    // Note: This will also be re-setup in useFocusEffect when screen comes into focus
+    console.log('📨 Setting up message listener on mount...');
+    messageUnsubscribeRef.current = setupMessageListener();
 
     chatService.connect().then(() => {
       setupTypingListener();
@@ -275,8 +301,10 @@ const ChatDetailScreen: React.FC = () => {
 
     return () => {
       // Cleanup message listener
-      if (messageUnsubscribe) {
-        messageUnsubscribe();
+      if (messageUnsubscribeRef.current) {
+        console.log('🧹 Cleaning up message listener on unmount...');
+        messageUnsubscribeRef.current();
+        messageUnsubscribeRef.current = null;
       }
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
@@ -496,13 +524,19 @@ const ChatDetailScreen: React.FC = () => {
   };
 
   /**
-   * Load chat name from storage (user's custom name for the chat)
+   * Load chat name and creation date from storage
    */
   const loadChatName = async () => {
     try {
       const chat = await chatStorageService.getChat(chatId);
-      if (chat && chat.otherUser?.name) {
-        setChatName(chat.otherUser.name);
+      if (chat) {
+        if (chat.otherUser?.name) {
+          setChatName(chat.otherUser.name);
+        }
+        // Load creation timestamp
+        if (chat.createdAt) {
+          setChatCreatedAt(chat.createdAt);
+        }
       }
     } catch (error) {
       console.error('Error loading chat name:', error);
@@ -1621,7 +1655,21 @@ const ChatDetailScreen: React.FC = () => {
               </TouchableOpacity>
             </TouchableOpacity>
             <Text style={styles.headerStatus} numberOfLines={1}>
-              {isTyping && typingUser ? `${typingUser} is typing...` : (isAppUser ? 'online' : 'tap to add to contacts')}
+              {isTyping && typingUser ? `${typingUser} is typing...` : (
+                chatCreatedAt ? (() => {
+                  try {
+                    const chatDate = new Date(chatCreatedAt);
+                    if (isNaN(chatDate.getTime())) {
+                      return isAppUser ? 'online' : 'tap to add to contacts';
+                    }
+                    return `Started chatting on ${format(chatDate, 'MMM d, yyyy')} at ${format(chatDate, 'h:mm a')}`;
+                  } catch (e) {
+                    return isAppUser ? 'online' : 'tap to add to contacts';
+                  }
+                })() : (
+                  isAppUser ? 'online' : 'tap to add to contacts'
+                )
+              )}
             </Text>
           </View>
         </View>
@@ -1660,6 +1708,38 @@ const ChatDetailScreen: React.FC = () => {
         <View style={styles.messagesContainer}>
         {messages.length === 0 ? (
           <View style={styles.emptyContainer}>
+            {chatCreatedAt && (
+              <View style={[styles.chatStartHeader, styles.emptyChatStartHeader]}>
+                <View style={styles.chatStartContent}>
+                  <Icon name="chatbubbles" size={22} color="#075E54" style={styles.chatStartIcon} />
+                  <View style={styles.chatStartTextContainer}>
+                    <Text style={styles.chatStartLabel}>Chat started</Text>
+                    <Text style={styles.chatStartDate}>
+                      {(() => {
+                        try {
+                          const chatDate = new Date(chatCreatedAt);
+                          if (isNaN(chatDate.getTime())) return null;
+                          return format(chatDate, 'EEEE, MMMM d, yyyy');
+                        } catch (e) {
+                          return null;
+                        }
+                      })()}
+                    </Text>
+                    <Text style={styles.chatStartTime}>
+                      {(() => {
+                        try {
+                          const chatDate = new Date(chatCreatedAt);
+                          if (isNaN(chatDate.getTime())) return null;
+                          return format(chatDate, 'h:mm a');
+                        } catch (e) {
+                          return null;
+                        }
+                      })()}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            )}
             <Text style={styles.emptyText}>No messages yet</Text>
             <Text style={styles.emptySubtext}>Start the conversation</Text>
           </View>
@@ -1673,6 +1753,40 @@ const ChatDetailScreen: React.FC = () => {
               extraData={messages}
               removeClippedSubviews={false}
               contentContainerStyle={styles.messagesList}
+              ListHeaderComponent={
+                chatCreatedAt ? (
+                  <View style={styles.chatStartHeader}>
+                    <View style={styles.chatStartContent}>
+                      <Icon name="chatbubbles" size={20} color="#075E54" style={styles.chatStartIcon} />
+                      <View style={styles.chatStartTextContainer}>
+                        <Text style={styles.chatStartLabel}>Chat started</Text>
+                        <Text style={styles.chatStartDate}>
+                          {(() => {
+                            try {
+                              const chatDate = new Date(chatCreatedAt);
+                              if (isNaN(chatDate.getTime())) return null;
+                              return format(chatDate, 'EEEE, MMMM d, yyyy');
+                            } catch (e) {
+                              return null;
+                            }
+                          })()}
+                        </Text>
+                        <Text style={styles.chatStartTime}>
+                          {(() => {
+                            try {
+                              const chatDate = new Date(chatCreatedAt);
+                              if (isNaN(chatDate.getTime())) return null;
+                              return format(chatDate, 'h:mm a');
+                            } catch (e) {
+                              return null;
+                            }
+                          })()}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                ) : null
+              }
               onContentSizeChange={() => {
                 // Scroll to bottom when new messages are added (WhatsApp style)
                 if (messages.length > 0) {
@@ -1969,9 +2083,9 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   headerStatus: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#fff',
-    opacity: 0.8,
+    opacity: 0.85,
     marginTop: 2,
   },
   headerButton: {
@@ -1983,6 +2097,61 @@ const styles = StyleSheet.create({
   },
   messagesList: {
     padding: 15,
+    paddingTop: 10,
+  },
+  chatStartHeader: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 18,
+    marginBottom: 20,
+    marginTop: 10,
+    marginHorizontal: 10,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 2},
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
+  },
+  chatStartContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: '100%',
+  },
+  chatStartIcon: {
+    marginRight: 14,
+    opacity: 0.8,
+  },
+  chatStartTextContainer: {
+    flex: 1,
+    alignItems: 'flex-start',
+  },
+  chatStartLabel: {
+    fontSize: 10,
+    color: '#667781',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  chatStartDate: {
+    fontSize: 16,
+    color: '#075E54',
+    fontWeight: '700',
+    marginBottom: 3,
+    lineHeight: 22,
+  },
+  chatStartTime: {
+    fontSize: 14,
+    color: '#667781',
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  emptyChatStartHeader: {
+    marginBottom: 30,
+    marginTop: 0,
   },
   messageWrapper: {
     width: '100%',
